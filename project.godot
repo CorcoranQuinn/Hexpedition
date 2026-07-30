@@ -1,0 +1,26 @@
+; Engine configuration file.
+; Godot 4.x project — open with Godot 4.2+
+
+config_version=5
+
+[application]
+
+config/name="Hex Tactics"
+config/description="Hex-grid tactical game with P2P multiplayer"
+run/main_scene="res://scenes/main_menu.tscn"
+config/features=PackedStringArray("4.2", "Forward Plus")
+
+[autoload]
+
+GameState="*res://scripts/autoload/game_state.gd"
+NetworkManager="*res://scripts/autoload/network_manager.gd"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
