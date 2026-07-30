@@ -19,6 +19,9 @@ var attack_die_sides: int = 4  # roll 1..N for basic attack damage
 var ability_cost: int = 2
 var is_leader: bool = false
 var is_alive: bool = true
+var is_ai_controlled: bool = false
+var is_minion: bool = false
+var summoner_id: String = ""
 
 # Runtime buffs from abilities
 var damage_bonus: int = 0
@@ -46,12 +49,16 @@ func perform_basic_attack(target: UnitBase) -> int:
 	return damage
 
 
-func can_attack(target: UnitBase) -> bool:
+func can_attack(target: UnitBase, line_of_sight_check: Callable = Callable()) -> bool:
 	if target == null or not is_alive or not target.is_alive:
 		return false
 	if target.owner_id == owner_id:
 		return false
-	return HexCoords.distance(hex_position, target.hex_position) <= attack_range
+	if HexCoords.distance(hex_position, target.hex_position) > attack_range:
+		return false
+	if line_of_sight_check.is_valid() and not line_of_sight_check.call(hex_position, target.hex_position):
+		return false
+	return true
 
 
 func take_damage(amount: int) -> void:
@@ -89,6 +96,10 @@ func get_ability_description() -> String:
 func reset_turn_modifiers() -> void:
 	damage_bonus = 0
 	defense_bonus = 0
+
+
+func is_player_controllable() -> bool:
+	return is_alive and not is_ai_controlled
 
 
 func to_snapshot() -> Dictionary:

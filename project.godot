@@ -1,14 +1,23 @@
 ; Engine configuration file.
-; Godot 4.x project — open with Godot 4.2+
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
 
 config_version=5
+
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
 config/name="Hex Tactics"
 config/description="Hex-grid tactical game with P2P multiplayer"
 run/main_scene="res://scenes/main_menu.tscn"
-config/features=PackedStringArray("4.2", "Forward Plus")
+config/features=PackedStringArray("4.6", "Forward Plus")
 
 [autoload]
 
@@ -20,7 +29,3 @@ NetworkManager="*res://scripts/autoload/network_manager.gd"
 window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
-
-[rendering]
-
-renderer/rendering_method="forward_plus"

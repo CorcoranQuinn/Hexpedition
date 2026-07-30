@@ -33,8 +33,6 @@ func spend_action() -> bool:
 		return false
 	actions_remaining -= 1
 	actions_changed.emit(actions_remaining)
-	if actions_remaining <= 0:
-		end_turn()
 	return true
 
 

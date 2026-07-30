@@ -9,6 +9,9 @@ static var _factories: Dictionary = {
 	"veil_follower": _make_veil_follower,
 	"ember_leader": _make_ember_leader,
 	"ember_follower": _make_ember_follower,
+	"swarm_leader": _make_swarm_leader,
+	"swarm_follower": _make_swarm_follower,
+	"swarm_minion": _make_swarm_minion,
 }
 
 
@@ -20,6 +23,17 @@ static func create(type_id: String, owner_id: int, team_id: int, unit_index: int
 	unit.owner_id = owner_id
 	unit.team_id = team_id
 	unit.id = "%d_%s_%d" % [owner_id, type_id, unit_index]
+	return unit
+
+
+static func create_minion(type_id: String, owner_id: int, team_id: int, unique_idx: int) -> UnitBase:
+	if not _factories.has(type_id):
+		push_warning("Unknown minion type: %s" % type_id)
+		return SwarmMinionUnit.new()
+	var unit: UnitBase = _factories[type_id].call()
+	unit.owner_id = owner_id
+	unit.team_id = team_id
+	unit.id = "%d_%s_m%d" % [owner_id, type_id, unique_idx]
 	return unit
 
 
@@ -108,12 +122,13 @@ class VeilLeaderUnit extends UnitBase:
 
 	func use_ability(context: Dictionary) -> Dictionary:
 		var grid: HexGrid = context.get("grid", null)
-		if grid == null:
-			return {"success": false, "message": "No grid context."}
+		var reveal_hex: Callable = context.get("reveal_hex", Callable())
+		if grid == null or not reveal_hex.is_valid():
+			return {"success": false, "message": "No reveal context."}
 		var revealed_count: int = 0
 		for neighbor in HexCoords.neighbors(hex_position):
-			if grid.has_tile(neighbor) and not grid.get_tile(neighbor).revealed:
-				grid.reveal_tile(neighbor)
+			if grid.has_tile(neighbor):
+				reveal_hex.call(neighbor)
 				revealed_count += 1
 		return {"success": true, "message": "Whisper Scan revealed %d adjacent tiles." % revealed_count}
 
@@ -198,7 +213,8 @@ class EmberFollowerUnit extends UnitBase:
 
 	func use_ability(context: Dictionary) -> Dictionary:
 		var target: UnitBase = context.get("target", null)
-		if target == null or not can_attack(target):
+		var los_check: Callable = context.get("line_of_sight_check", Callable())
+		if target == null or not can_attack(target, los_check):
 			return {"success": false, "message": "No valid target in range."}
 		var dmg: int = perform_basic_attack(target)
 		return {"success": true, "message": "Double Strike dealt %d damage." % dmg}
@@ -213,3 +229,104 @@ static func _make_ember_leader() -> UnitBase:
 
 static func _make_ember_follower() -> UnitBase:
 	return EmberFollowerUnit.new()
+
+
+# --- Swarm faction (summoner, minions) ---
+
+class SwarmLeaderUnit extends UnitBase:
+	func _init(p_owner: int = 0, p_team: int = 0, idx: int = 0) -> void:
+		display_name = "Hive Matriarch"
+		is_leader = true
+		max_health = 10
+		move_range = 2
+		attack_range = 1
+		attack_die_sides = 3
+		ability_cost = 2
+		owner_id = p_owner
+		team_id = p_team
+		id = "%d_swarm_leader_%d" % [p_owner, idx]
+		health = max_health
+
+	func get_unit_type_id() -> String:
+		return "swarm_leader"
+
+	func use_ability(context: Dictionary) -> Dictionary:
+		var summon_minion: Callable = context.get("summon_minion", Callable())
+		if not summon_minion.is_valid():
+			return {"success": false, "message": "Cannot summon."}
+		var summon_hex: Vector2i = context.get("summon_hex", Vector2i(-999, -999))
+		if summon_hex != Vector2i(-999, -999):
+			if summon_minion.call(summon_hex) != null:
+				return {"success": true, "message": "Hive Matriarch spawned a minion."}
+			return {"success": false, "message": "No room to summon there."}
+		for neighbor in HexCoords.neighbors(hex_position):
+			if summon_minion.call(neighbor) != null:
+				return {"success": true, "message": "Hive Matriarch spawned a minion."}
+		return {"success": false, "message": "No adjacent space to summon."}
+
+	func get_ability_description() -> String:
+		return "Spawn Minion (2 RP): Summon an AI-controlled minion on an adjacent hex."
+
+
+class SwarmFollowerUnit extends UnitBase:
+	func _init(p_owner: int = 0, p_team: int = 0, idx: int = 0) -> void:
+		display_name = "Swarm Herald"
+		max_health = 7
+		move_range = 2
+		attack_range = 1
+		attack_die_sides = 3
+		ability_cost = 1
+		owner_id = p_owner
+		team_id = p_team
+		id = "%d_swarm_follower_%d" % [p_owner, idx]
+		health = max_health
+
+	func get_unit_type_id() -> String:
+		return "swarm_follower"
+
+	func use_ability(context: Dictionary) -> Dictionary:
+		var summon_minion: Callable = context.get("summon_minion", Callable())
+		if not summon_minion.is_valid():
+			return {"success": false, "message": "Cannot summon."}
+		for neighbor in HexCoords.neighbors(hex_position):
+			var minion: Variant = summon_minion.call(neighbor)
+			if minion != null:
+				return {"success": true, "message": "Swarm Herald spawned a minion."}
+		return {"success": false, "message": "No adjacent space to summon."}
+
+	func get_ability_description() -> String:
+		return "Call Drone (1 RP): Summon a weaker AI minion on an adjacent hex."
+
+
+class SwarmMinionUnit extends UnitBase:
+	func _init(_p_owner: int = 0, _p_team: int = 0, _idx: int = 0) -> void:
+		display_name = "Swarm Drone"
+		max_health = 3
+		move_range = 1
+		attack_range = 1
+		attack_die_sides = 2
+		ability_cost = 99
+		is_ai_controlled = true
+		is_minion = true
+		health = max_health
+
+	func get_unit_type_id() -> String:
+		return "swarm_minion"
+
+	func use_ability(_context: Dictionary) -> Dictionary:
+		return {"success": false, "message": "Minions cannot use abilities."}
+
+	func get_ability_description() -> String:
+		return "AI-controlled — acts automatically at end of turn."
+
+
+static func _make_swarm_leader() -> UnitBase:
+	return SwarmLeaderUnit.new()
+
+
+static func _make_swarm_follower() -> UnitBase:
+	return SwarmFollowerUnit.new()
+
+
+static func _make_swarm_minion() -> UnitBase:
+	return SwarmMinionUnit.new()

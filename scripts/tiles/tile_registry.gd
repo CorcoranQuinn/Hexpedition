@@ -6,10 +6,11 @@ static var _factories: Dictionary = {
 	"hidden": _make_hidden,
 	"plain": _make_plain,
 	"rough": _make_rough,
-	"vitality": _make_vitality,
+	"mountain": _make_mountain,
 	"sentinel_bastion": _make_sentinel_bastion,
 	"veil_mirror": _make_veil_mirror,
 	"ember_forge": _make_ember_forge,
+	"swarm_hive": _make_swarm_hive,
 }
 
 
@@ -21,9 +22,8 @@ static func create(type_id: String, hex: Vector2i, team_id: int = -1) -> TileBas
 	return tile
 
 
-static func create_random_hidden(hex: Vector2i, rng: RandomNumberGenerator) -> TileBase:
-	var pool: Array[String] = ["plain", "plain", "plain", "rough", "vitality"]
-	return create(pool[rng.randi_range(0, pool.size() - 1)], hex)
+static func create_random_hidden(hex: Vector2i, _rng: RandomNumberGenerator) -> TileBase:
+	return create("plain", hex)
 
 
 # --- Generic tiles ---
@@ -55,6 +55,25 @@ class PlainTile extends TileBase:
 
 	func get_revealed_color() -> Color:
 		return Color(0.45, 0.48, 0.42)
+
+
+class MountainTile extends TileBase:
+	func _init(hex: Vector2i) -> void:
+		hex_position = hex
+		revealed = true
+		display_name = "Mountain"
+
+	func get_tile_type_id() -> String:
+		return "mountain"
+
+	func get_revealed_color() -> Color:
+		return Color(0.28, 0.30, 0.34)
+
+	func blocks_movement() -> bool:
+		return true
+
+	func blocks_projectiles() -> bool:
+		return true
 
 
 class RoughTile extends TileBase:
@@ -95,6 +114,10 @@ static func _make_hidden(hex: Vector2i, _team: int = -1) -> TileBase:
 
 static func _make_plain(hex: Vector2i, _team: int = -1) -> TileBase:
 	return PlainTile.new(hex)
+
+
+static func _make_mountain(hex: Vector2i, _team: int = -1) -> TileBase:
+	return MountainTile.new(hex)
 
 
 static func _make_rough(hex: Vector2i, _team: int = -1) -> TileBase:
@@ -145,13 +168,18 @@ class VeilMirrorTile extends TileBase:
 
 	func interact(unit: UnitBase, context: Dictionary) -> Dictionary:
 		var grid: HexGrid = context.get("grid", null)
+		var reveal_hex: Callable = context.get("reveal_hex", Callable())
 		if grid == null:
-			return {"success": false, "message": "No grid."}
+			return {"success": false, "message": "No grid context."}
 		var far_hex: Vector2i = unit.hex_position + Vector2i(0, -2)
-		if grid.has_tile(far_hex):
-			grid.reveal_tile(far_hex)
-			return {"success": true, "message": "Mirror Veil scried a distant tile."}
-		return {"success": false, "message": "No tile to scry."}
+		if not grid.has_tile(far_hex):
+			return {"success": false, "message": "No tile to scry."}
+		var los_check: Callable = context.get("has_line_of_sight", Callable())
+		if los_check.is_valid() and not los_check.call(unit.hex_position, far_hex):
+			return {"success": false, "message": "Mountain blocks the scry."}
+		if reveal_hex.is_valid():
+			reveal_hex.call(far_hex)
+		return {"success": true, "message": "Mirror Veil scried a distant tile."}
 
 
 class EmberForgeTile extends TileBase:
@@ -173,6 +201,30 @@ class EmberForgeTile extends TileBase:
 		return {"success": true, "message": "Ember Forge empowers your next attack (+2)."}
 
 
+class SwarmHiveTile extends TileBase:
+	func _init(hex: Vector2i, p_team: int) -> void:
+		hex_position = hex
+		revealed = true
+		display_name = "Swarm Hive"
+		is_team_unique = true
+		team_id = p_team
+
+	func get_tile_type_id() -> String:
+		return "swarm_hive"
+
+	func get_revealed_color() -> Color:
+		return Color(0.42, 0.62, 0.32)
+
+	func interact(unit: UnitBase, context: Dictionary) -> Dictionary:
+		var summon_minion: Callable = context.get("summon_minion", Callable())
+		if not summon_minion.is_valid():
+			return {"success": false, "message": "Cannot summon from hive."}
+		for neighbor in HexCoords.neighbors(unit.hex_position):
+			if summon_minion.call(neighbor) != null:
+				return {"success": true, "message": "Swarm Hive spawned a minion."}
+		return {"success": false, "message": "No adjacent space at the hive."}
+
+
 static func _make_sentinel_bastion(hex: Vector2i, team: int) -> TileBase:
 	return SentinelBastionTile.new(hex, team)
 
@@ -183,3 +235,7 @@ static func _make_veil_mirror(hex: Vector2i, team: int) -> TileBase:
 
 static func _make_ember_forge(hex: Vector2i, team: int) -> TileBase:
 	return EmberForgeTile.new(hex, team)
+
+
+static func _make_swarm_hive(hex: Vector2i, team: int) -> TileBase:
+	return SwarmHiveTile.new(hex, team)

@@ -43,6 +43,11 @@ unique_name_in_owner = true
 layout_mode = 2
 text = "Local Hot-Seat"
 
+[node name="SoloButton" type="Button" parent="VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Solo vs AI"
+
 [node name="HostButton" type="Button" parent="VBox"]
 unique_name_in_owner = true
 layout_mode = 2

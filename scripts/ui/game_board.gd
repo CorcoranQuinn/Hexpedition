@@ -20,6 +20,7 @@ var _action_mode: String = ""
 var _move_targets: Dictionary = {}
 var _tile_nodes: Dictionary = {}
 var _unit_nodes: Dictionary = {}
+var _ai_running: bool = false
 
 
 func _ready() -> void:
@@ -33,6 +34,7 @@ func _ready() -> void:
 	match.action_log.connect(_append_log)
 	match.match_over.connect(_on_match_over)
 	match.turn_manager.player_changed.connect(func(_p): _selected_unit = null; _action_mode = "")
+	match.turn_manager.turn_started.connect(_on_turn_started)
 	NetworkManager.action_applied.connect(_on_network_action)
 
 	if GameState.pending_rematch_same_teams:
@@ -92,8 +94,13 @@ func _spawn_unit_visual(unit: UnitBase) -> void:
 	marker.polygon = pts
 	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[unit.owner_id])
 	marker.color = team.team_color
-	if unit.is_leader:
+	if unit.is_minion:
+		marker.scale = Vector2(0.65, 0.65)
+		marker.modulate = Color(0.85, 0.85, 0.85)
+	elif unit.is_leader:
 		marker.scale = Vector2(1.3, 1.3)
+	if unit.is_ai_controlled:
+		marker.modulate = marker.modulate * Color(0.9, 0.95, 0.9)
 	marker.position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
 	board_root.add_child(marker)
 	_unit_nodes[unit.id] = marker
@@ -101,7 +108,11 @@ func _spawn_unit_visual(unit: UnitBase) -> void:
 
 func _refresh_ui() -> void:
 	var pid: int = match.turn_manager.current_player
-	turn_label.text = "Turn %d — Player %d" % [match.turn_manager.turn_number, pid + 1]
+	if GameState.is_solo():
+		var who: String = "Your Turn" if pid == 0 else "AI Turn"
+		turn_label.text = "Turn %d — %s" % [match.turn_manager.turn_number, who]
+	else:
+		turn_label.text = "Turn %d — Player %d" % [match.turn_manager.turn_number, pid + 1]
 	actions_label.text = "Actions: %d / %d" % [
 		match.turn_manager.actions_remaining, TurnManager.ACTIONS_PER_TURN
 	]
@@ -147,16 +158,44 @@ func _update_action_buttons() -> void:
 
 
 func _can_local_player_act() -> bool:
+	if GameState.is_solo():
+		return match.turn_manager.current_player == 0 and match.turn_manager.can_spend_action() and not _ai_running
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		return match.turn_manager.can_spend_action()
 	var local_id: int = GameState.get_local_player_id()
 	return match.turn_manager.current_player == local_id and match.turn_manager.can_spend_action()
 
 
+func _on_turn_started(player_id: int) -> void:
+	_refresh_ui()
+	if GameState.is_solo() and player_id == GameState.get_ai_player_id():
+		_run_ai_turn_async()
+
+
 func _get_active_player_id() -> int:
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		return match.turn_manager.current_player
+	if GameState.is_solo():
+		return 0
 	return GameState.get_local_player_id()
+
+
+func _run_ai_turn_async() -> void:
+	if _ai_running:
+		return
+	_ai_running = true
+	_update_action_buttons()
+	await get_tree().create_timer(0.5).timeout
+	if GameState.is_solo() and match.turn_manager.current_player == GameState.get_ai_player_id():
+		MatchAI.run_turn(match, GameState.get_ai_player_id())
+		_refresh_ui()
+	_ai_running = false
+	_update_action_buttons()
+
+
+func _is_summoner(unit: UnitBase) -> bool:
+	var type_id: String = unit.get_unit_type_id()
+	return type_id == "swarm_leader" or type_id == "swarm_follower"
 
 
 func _set_mode(mode: String) -> void:
@@ -186,8 +225,8 @@ func _execute_action(action_type: String, payload: Dictionary) -> Dictionary:
 		"tile":
 			return match.perform_tile_interact(pid, payload.get("unit_id", ""))
 		"end_turn":
-			while match.turn_manager.actions_remaining > 0:
-				match.turn_manager.spend_action()
+			var pid: int = payload.get("player_id", _get_active_player_id())
+			match.end_turn_with_minions(pid)
 			return {"success": true}
 	return {"success": false, "message": "Unknown action."}
 
@@ -216,18 +255,22 @@ func _on_network_action(action_type: String, payload: Dictionary, result: Dictio
 
 
 func _handle_hex_click(hex: Vector2i) -> void:
+	if _ai_running:
+		return
 	if GameState.is_online() and not _can_local_player_act():
+		return
+	if GameState.is_solo() and match.turn_manager.current_player != 0:
 		return
 	var pid: int = _get_active_player_id()
 	var clicked_unit: UnitBase = match.get_unit_at(hex)
 
 	match _action_mode:
 		"":
-			if clicked_unit and clicked_unit.owner_id == pid:
+			if clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 				unit_info.text = _format_unit(clicked_unit)
 		"move":
-			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid:
+			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 				unit_info.text = _format_unit(clicked_unit)
 			elif _selected_unit != null:
@@ -236,7 +279,7 @@ func _handle_hex_click(hex: Vector2i) -> void:
 				_move_targets.clear()
 				_action_mode = ""
 		"attack":
-			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid:
+			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 			elif _selected_unit != null and clicked_unit and clicked_unit.owner_id != pid:
 				_submit_action("attack", {
@@ -246,13 +289,24 @@ func _handle_hex_click(hex: Vector2i) -> void:
 				_selected_unit = null
 				_action_mode = ""
 		"ability":
-			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid:
+			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
-				_submit_action("ability", {"unit_id": _selected_unit.id})
+				if _is_summoner(_selected_unit):
+					log_label.text = "Select an adjacent empty hex to summon."
+				else:
+					_submit_action("ability", {"unit_id": _selected_unit.id})
+					_selected_unit = null
+					_action_mode = ""
+			elif _selected_unit != null and _is_summoner(_selected_unit):
+				if HexCoords.distance(_selected_unit.hex_position, hex) == 1:
+					_submit_action("ability", {
+						"unit_id": _selected_unit.id,
+						"extra": {"summon_hex": hex},
+					})
 				_selected_unit = null
 				_action_mode = ""
 		"tile":
-			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid:
+			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 			elif _selected_unit != null:
 				_submit_action("tile", {"unit_id": _selected_unit.id})
@@ -265,9 +319,15 @@ func _on_end_turn() -> void:
 
 
 func _format_unit(unit: UnitBase) -> String:
+	var tags: String = ""
+	if unit.is_leader:
+		tags += " [Leader]"
+	if unit.is_minion:
+		tags += " [Minion]"
+	if unit.is_ai_controlled:
+		tags += " [AI]"
 	return "%s%s\nHP: %d/%d  Move: %d  Range: %d\nAbility (%d RP): %s" % [
-		unit.display_name,
-		" [Leader]" if unit.is_leader else "",
+		unit.display_name, tags,
 		unit.health, unit.max_health,
 		unit.move_range, unit.attack_range,
 		unit.ability_cost, unit.get_ability_description(),
@@ -288,4 +348,10 @@ func _append_log(msg: String) -> void:
 
 func _on_match_over(winner_id: int) -> void:
 	GameState.last_winner_id = winner_id
+	if GameState.is_solo():
+		if winner_id == 0:
+			log_label.text = "Victory!"
+		else:
+			log_label.text = "Defeat!"
+		await get_tree().create_timer(1.0).timeout
 	get_tree().change_scene_to_file("res://scenes/end_game.tscn")

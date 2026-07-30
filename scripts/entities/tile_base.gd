@@ -51,3 +51,11 @@ func can_interact(unit: UnitBase) -> bool:
 
 func movement_cost_modifier() -> int:
 	return 0
+
+
+func blocks_movement() -> bool:
+	return false
+
+
+func blocks_projectiles() -> bool:
+	return false

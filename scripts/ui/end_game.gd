@@ -8,13 +8,16 @@ extends Control
 
 func _ready() -> void:
 	var winner_id: int = GameState.last_winner_id
-	winner_label.text = "Player %d wins!" % (winner_id + 1)
+	if GameState.is_solo():
+		winner_label.text = "You win!" if winner_id == 0 else "AI wins!"
+	else:
+		winner_label.text = "Player %d wins!" % (winner_id + 1)
 	rematch_button.pressed.connect(_on_rematch)
 	new_select_button.pressed.connect(_on_new_select)
 	disconnect_button.pressed.connect(_on_disconnect)
 	NetworkManager.rematch_requested.connect(_on_remote_rematch)
 
-	if GameState.match_mode == GameState.MatchMode.LOCAL:
+	if GameState.match_mode == GameState.MatchMode.LOCAL or GameState.is_solo():
 		disconnect_button.text = "Back to Menu"
 
 

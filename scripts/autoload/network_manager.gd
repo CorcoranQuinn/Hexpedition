@@ -55,6 +55,8 @@ func is_connected_online() -> bool:
 
 
 func get_display_name(player_id: int) -> String:
+	if GameState.is_solo():
+		return "You" if player_id == 0 else "AI"
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		return "Player %d" % (player_id + 1)
 	if player_id == 0:
@@ -125,7 +127,7 @@ func submit_team_selection(player_id: int, team_id: int) -> void:
 func request_start_if_ready() -> void:
 	if not GameState.all_teams_selected():
 		return
-	if GameState.match_mode == GameState.MatchMode.LOCAL:
+	if GameState.match_mode == GameState.MatchMode.LOCAL or GameState.is_solo():
 		match_start_requested.emit()
 	elif multiplayer.is_server():
 		var seed_value: int = randi()

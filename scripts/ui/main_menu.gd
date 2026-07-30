@@ -1,6 +1,7 @@
 extends Control
 
 @onready var local_button: Button = %LocalButton
+@onready var solo_button: Button = %SoloButton
 @onready var host_button: Button = %HostButton
 @onready var join_button: Button = %JoinButton
 @onready var address_input: LineEdit = %AddressInput
@@ -9,6 +10,7 @@ extends Control
 
 func _ready() -> void:
 	local_button.pressed.connect(_on_local_pressed)
+	solo_button.pressed.connect(_on_solo_pressed)
 	host_button.pressed.connect(_on_host_pressed)
 	join_button.pressed.connect(_on_join_pressed)
 	NetworkManager.connection_succeeded.connect(_on_connected)
@@ -19,6 +21,12 @@ func _ready() -> void:
 func _on_local_pressed() -> void:
 	GameState.reset_match_state()
 	GameState.match_mode = GameState.MatchMode.LOCAL
+	get_tree().change_scene_to_file("res://scenes/character_select.tscn")
+
+
+func _on_solo_pressed() -> void:
+	GameState.reset_match_state()
+	GameState.match_mode = GameState.MatchMode.SOLO
 	get_tree().change_scene_to_file("res://scenes/character_select.tscn")
 
 

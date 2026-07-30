@@ -7,6 +7,7 @@ extends Control
 @onready var p1_status: Label = %P1Status
 @onready var p2_status: Label = %P2Status
 @onready var confirm_button: Button = %ConfirmButton
+@onready var random_button: Button = %RandomButton
 @onready var start_button: Button = %StartButton
 @onready var back_button: Button = %BackButton
 
@@ -21,6 +22,7 @@ func _ready() -> void:
 	team_list.select(0)
 	team_list.item_selected.connect(_on_team_selected)
 	confirm_button.pressed.connect(_on_confirm_pressed)
+	random_button.pressed.connect(_on_random_pressed)
 	start_button.pressed.connect(_on_start_pressed)
 	back_button.pressed.connect(_on_back_pressed)
 	NetworkManager.selection_updated.connect(_on_selection_updated)
@@ -33,6 +35,10 @@ func _ready() -> void:
 
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		p2_status.visible = true
+	elif GameState.is_solo():
+		p2_status.visible = true
+		p2_status.text = "AI: random team on confirm"
+		confirm_button.text = "Confirm & Start"
 	else:
 		p2_status.visible = true
 		if GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
@@ -41,7 +47,9 @@ func _ready() -> void:
 
 func _resolve_local_slot() -> void:
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
-		_local_slot = 0  # P1 selects first, then P2
+		_local_slot = 0
+	elif GameState.is_solo():
+		_local_slot = 0
 	elif GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
 		_local_slot = 0
 	else:
@@ -73,6 +81,8 @@ func _refresh_player_status() -> void:
 	start_button.disabled = not ready
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		start_button.visible = ready
+	elif GameState.is_solo():
+		start_button.visible = false
 	elif GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
 		start_button.visible = ready
 	else:
@@ -88,9 +98,23 @@ func _format_player_status(player_id: int) -> String:
 	return "%s: %s" % [name, team.team_name]
 
 
+func _on_random_pressed() -> void:
+	var random_idx: int = randi() % _teams.size()
+	team_list.select(random_idx)
+	_refresh_team_details()
+
+
 func _on_confirm_pressed() -> void:
 	var idx: int = team_list.get_selected_items()[0]
 	var team: TeamDefinition = _teams[idx]
+
+	if GameState.is_solo():
+		GameState.set_team_selection(0, team.team_id)
+		var ai_team_id: int = TeamRegistry.pick_random_team_id(team.team_id)
+		GameState.set_team_selection(1, ai_team_id)
+		_refresh_player_status()
+		NetworkManager.request_start_if_ready()
+		return
 
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		# Hot-seat: alternate between player slots

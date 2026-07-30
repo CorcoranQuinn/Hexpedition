@@ -3,7 +3,7 @@ extends Node
 
 signal match_config_changed
 
-enum MatchMode { LOCAL, ONLINE_HOST, ONLINE_CLIENT }
+enum MatchMode { LOCAL, SOLO, ONLINE_HOST, ONLINE_CLIENT }
 
 var match_mode: MatchMode = MatchMode.LOCAL
 var player_count: int = 2
@@ -42,9 +42,19 @@ func is_online() -> bool:
 	return match_mode == MatchMode.ONLINE_HOST or match_mode == MatchMode.ONLINE_CLIENT
 
 
+func is_solo() -> bool:
+	return match_mode == MatchMode.SOLO
+
+
+func get_ai_player_id() -> int:
+	return 1
+
+
 func get_local_player_id() -> int:
 	if match_mode == MatchMode.LOCAL:
 		return -1  # both players on one device
+	if match_mode == MatchMode.SOLO:
+		return 0
 	if match_mode == MatchMode.ONLINE_HOST:
 		return 0
 	return 1
