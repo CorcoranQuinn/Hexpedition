@@ -40,6 +40,7 @@ var _suppress_position_snap: Dictionary = {}  ## During move tween, don't snap u
 var _unit_actions_box: VBoxContainer  ## Quick-action buttons for the selected friendly unit.
 
 # --- Move path preview colors ---
+const PATH_COLOR_CONFIRMED := Color(0.35, 0.85, 0.95, 0.9)
 const PATH_COLOR_PREVIEW := Color(1.0, 0.92, 0.45, 0.75)
 
 
