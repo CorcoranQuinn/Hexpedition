@@ -22,6 +22,9 @@ var _tile_nodes: Dictionary = {}
 var _unit_nodes: Dictionary = {}
 var _ai_running: bool = false
 var _hovered_unit_id: String = ""
+var _battle_effects: BattleEffects
+var _units_dying: Dictionary = {}
+var _match_ending: bool = false
 
 
 func _ready() -> void:
@@ -34,6 +37,7 @@ func _ready() -> void:
 	match_ctrl.state_changed.connect(_refresh_ui)
 	match_ctrl.action_log.connect(_append_log)
 	match_ctrl.match_over.connect(_on_match_over)
+	match_ctrl.combat_event.connect(_on_combat_event)
 	NetworkManager.action_applied.connect(_on_network_action)
 
 	if GameState.pending_rematch_same_teams:
@@ -46,6 +50,9 @@ func _ready() -> void:
 	match_ctrl.setup_match(seed)
 	_connect_turn_signals()
 	_build_board_visuals()
+	_battle_effects = BattleEffects.new()
+	_battle_effects.setup(HEX_SIZE)
+	board_root.add_child(_battle_effects)
 	_refresh_ui()
 	set_process(true)
 
@@ -60,6 +67,8 @@ func _connect_turn_signals() -> void:
 func _on_player_changed(_player_id: int) -> void:
 	_selected_unit = null
 	_action_mode = ""
+	_move_targets.clear()
+	_update_move_button_label()
 	_update_unit_visual_states()
 
 
@@ -98,7 +107,7 @@ func _make_hex_polygon(tile: TileBase) -> Polygon2D:
 	return poly
 
 
-func _spawn_unit_visual(unit: UnitBase) -> void:
+func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 	if _unit_nodes.has(unit.id):
 		return
 
@@ -141,6 +150,10 @@ func _spawn_unit_visual(unit: UnitBase) -> void:
 	container.position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
 	board_root.add_child(container)
 	_unit_nodes[unit.id] = container
+	if animate_spawn:
+		container.scale = Vector2(0.2, 0.2)
+		var pop := create_tween()
+		pop.tween_property(container, "scale", Vector2.ONE, 0.28).set_trans(Tween.TRANS_BACK)
 
 
 func _make_unit_points(size: float) -> PackedVector2Array:
@@ -183,6 +196,7 @@ func _refresh_ui() -> void:
 	_update_board_colors()
 	_update_unit_positions()
 	_update_unit_visual_states()
+	_update_move_button_label()
 	_update_action_buttons()
 
 
@@ -199,12 +213,14 @@ func _update_board_colors() -> void:
 func _update_unit_positions() -> void:
 	for unit in match_ctrl.units:
 		if not unit.is_alive:
+			if _units_dying.has(unit.id):
+				continue
 			if _unit_nodes.has(unit.id):
 				_unit_nodes[unit.id].queue_free()
 				_unit_nodes.erase(unit.id)
 			continue
 		if not _unit_nodes.has(unit.id):
-			_spawn_unit_visual(unit)
+			_spawn_unit_visual(unit, true)
 		else:
 			_unit_nodes[unit.id].position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
 
@@ -264,11 +280,42 @@ func _is_summoner(unit: UnitBase) -> bool:
 
 
 func _set_mode(mode: String) -> void:
+	if _action_mode == "move" and mode == "move":
+		_confirm_move()
+		return
 	_action_mode = mode
 	_move_targets.clear()
 	_selected_unit = null
+	_update_move_button_label()
 	_update_unit_visual_states()
 	log_label.text = "Mode: %s — select a unit." % mode.capitalize()
+	if mode == "move":
+		log_label.text = "Move each unit (0–range), then click Move again to confirm."
+
+
+func _confirm_move() -> void:
+	if not _can_local_player_act():
+		return
+	if _move_targets.is_empty():
+		log_label.text = "Select unit destinations first, or choose another action."
+		return
+	var result: Dictionary = match_ctrl.can_apply_moves(_get_active_player_id(), _move_targets)
+	if not result.get("success", false):
+		log_label.text = result.get("message", "Invalid move.")
+		return
+	_submit_action("move", {"moves": _move_targets.duplicate()})
+	_move_targets.clear()
+	_action_mode = ""
+	_selected_unit = null
+	_update_move_button_label()
+	_update_unit_visual_states()
+
+
+func _update_move_button_label() -> void:
+	if _action_mode == "move" and not _move_targets.is_empty():
+		move_button.text = "Confirm Move (%d)" % _move_targets.size()
+	else:
+		move_button.text = "Move (+1 RP)"
 
 
 func _process(_delta: float) -> void:
@@ -286,6 +333,8 @@ func _process(_delta: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if _match_ending:
+		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var hex: Vector2i = _pixel_to_hex(get_local_mouse_position())
 		if not match_ctrl.grid.has_tile(hex):
@@ -334,7 +383,7 @@ func _on_network_action(action_type: String, payload: Dictionary, result: Dictio
 
 
 func _handle_hex_click(hex: Vector2i) -> void:
-	if _ai_running:
+	if _ai_running or _match_ending:
 		return
 	if GameState.is_online() and not _can_local_player_act():
 		return
@@ -353,13 +402,23 @@ func _handle_hex_click(hex: Vector2i) -> void:
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 				unit_info.text = _format_unit(clicked_unit)
+				if _move_targets.has(clicked_unit.id):
+					log_label.text = "Re-select destination for %s." % clicked_unit.display_name
+				else:
+					log_label.text = "Choose a destination for %s." % clicked_unit.display_name
 				_update_unit_visual_states()
 			elif _selected_unit != null:
+				for uid in _move_targets:
+					if uid != _selected_unit.id and _move_targets[uid] == hex:
+						log_label.text = "Another unit is already moving to that hex."
+						return
+				if not match_ctrl.can_move_unit_to(_selected_unit, hex, _move_targets):
+					log_label.text = "%s cannot reach that hex." % _selected_unit.display_name
+					return
 				_move_targets[_selected_unit.id] = hex
-				_submit_action("move", {"moves": _move_targets.duplicate()})
-				_move_targets.clear()
-				_action_mode = ""
+				log_label.text = "%s destination set. Pick another unit or click Move to confirm." % _selected_unit.display_name
 				_selected_unit = null
+				_update_move_button_label()
 				_update_unit_visual_states()
 		"attack":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
@@ -436,12 +495,79 @@ func _append_log(msg: String) -> void:
 	log_label.text = msg
 
 
+func _get_unit_world_pos(unit_id: String) -> Vector2:
+	if not _unit_nodes.has(unit_id):
+		return Vector2.INF
+	return _unit_nodes[unit_id].position
+
+
+func _get_unit_node(unit_id: String) -> Node2D:
+	if not _unit_nodes.has(unit_id):
+		return null
+	return _unit_nodes[unit_id]
+
+
+func _on_combat_event(event_type: String, data: Dictionary) -> void:
+	match event_type:
+		"attack":
+			var attacker_id: String = data.get("attacker_id", "")
+			var target_id: String = data.get("target_id", "")
+			var damage: int = int(data.get("damage", 0))
+			if not _unit_nodes.has(attacker_id) or not _unit_nodes.has(target_id):
+				return
+			var from_pos: Vector2 = _unit_nodes[attacker_id].position
+			var to_pos: Vector2 = _unit_nodes[target_id].position
+			var target_node: Node2D = _unit_nodes[target_id]
+			_battle_effects.play_attack(from_pos, to_pos, damage, target_node)
+			if data.get("target_killed", false):
+				_start_defeat_animation(target_id)
+		"ability":
+			var unit_id: String = data.get("unit_id", "")
+			if not _unit_nodes.has(unit_id):
+				return
+			var center: Vector2 = _unit_nodes[unit_id].position
+			_battle_effects.play_ability(
+				center,
+				data.get("ability_type", ""),
+				data,
+				_get_unit_world_pos,
+				_get_unit_node,
+			)
+			if data.get("target_killed", false):
+				var target_id: String = data.get("target_id", "")
+				if target_id != "":
+					_start_defeat_animation(target_id)
+
+
+func _start_defeat_animation(unit_id: String) -> void:
+	if _units_dying.has(unit_id) or not _unit_nodes.has(unit_id):
+		return
+	_units_dying[unit_id] = true
+	var container: Node2D = _unit_nodes[unit_id]
+	_unit_nodes.erase(unit_id)
+	_battle_effects.play_defeat(container, func() -> void:
+		_units_dying.erase(unit_id)
+	)
+
+
+func _find_losing_leader_position(loser_id: int) -> Vector2:
+	for unit in match_ctrl.units:
+		if unit.owner_id == loser_id and unit.is_leader:
+			return HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
+	return Vector2.INF
+
+
 func _on_match_over(winner_id: int) -> void:
+	_match_ending = true
 	GameState.last_winner_id = winner_id
+	_update_action_buttons()
+
+	var local_player_id: int = 0 if GameState.is_solo() else GameState.get_local_player_id()
+	var loser_id: int = 1 - winner_id
+	var leader_pos: Vector2 = _find_losing_leader_position(loser_id)
+
 	if GameState.is_solo():
-		if winner_id == 0:
-			log_label.text = "Victory!"
-		else:
-			log_label.text = "Defeat!"
-		await get_tree().create_timer(1.0).timeout
+		log_label.text = "Victory!" if winner_id == 0 else "Defeat!"
+
+	await _battle_effects.play_match_end(self, board_root, winner_id, local_player_id, leader_pos)
 	get_tree().change_scene_to_file("res://scenes/end_game.tscn")

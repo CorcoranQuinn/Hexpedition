@@ -5,6 +5,7 @@ extends RefCounted
 signal state_changed
 signal action_log(message: String)
 signal match_over(winner_id: int)
+signal combat_event(event_type: String, data: Dictionary)
 
 const BOARD_RADIUS: int = 4
 const MOUNTAIN_COUNT: int = 9
@@ -174,11 +175,11 @@ func can_act(player_id: int) -> bool:
 
 # --- Actions ---
 
-func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
-	## moves: { unit_id: Vector2i target_hex }
-	if not can_act(player_id):
-		return _fail("Not your turn or no actions left.")
+func can_move_unit_to(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> bool:
+	return _can_move_unit(unit, target, pending_moves)
 
+
+func can_apply_moves(player_id: int, moves: Dictionary) -> Dictionary:
 	for unit_id in moves:
 		var unit: UnitBase = _find_unit(unit_id)
 		if unit == null or unit.owner_id != player_id:
@@ -186,8 +187,28 @@ func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
 		if not unit.is_player_controllable():
 			return _fail("That unit is AI-controlled.")
 		var target: Vector2i = moves[unit_id]
-		if not _can_move_unit(unit, target):
+		if not _can_move_unit(unit, target, moves):
 			return _fail("%s cannot reach that hex." % unit.display_name)
+	var targets: Array[Vector2i] = []
+	for unit_id in moves:
+		var target: Vector2i = moves[unit_id]
+		var unit: UnitBase = _find_unit(unit_id)
+		if target == unit.hex_position:
+			continue
+		if target in targets:
+			return _fail("Two units cannot move to the same hex.")
+		targets.append(target)
+	return {"success": true}
+
+
+func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
+	## moves: { unit_id: Vector2i target_hex }
+	if not can_act(player_id):
+		return _fail("Not your turn or no actions left.")
+
+	var check: Dictionary = can_apply_moves(player_id, moves)
+	if not check.get("success", false):
+		return check
 
 	for unit_id in moves:
 		var unit: UnitBase = _find_unit(unit_id)
@@ -221,6 +242,12 @@ func perform_attack(player_id: int, attacker_id: String, target_id: String) -> D
 		return _fail("Target out of range, blocked by terrain, or invalid.")
 
 	var damage: int = attacker.perform_basic_attack(target)
+	_emit_combat_event("attack", {
+		"attacker_id": attacker.id,
+		"target_id": target.id,
+		"damage": damage,
+		"target_killed": not target.is_alive,
+	})
 	turn_manager.spend_action()
 	_after_action_spent(player_id)
 	action_log.emit("%s hit %s for %d damage." % [
@@ -258,6 +285,22 @@ func perform_ability(player_id: int, unit_id: String, extra: Dictionary = {}) ->
 		return result
 
 	resource_points[player_id] -= unit.ability_cost
+	var ability_event: Dictionary = {
+		"unit_id": unit.id,
+		"ability_type": unit.get_unit_type_id(),
+	}
+	if extra.has("summon_hex"):
+		ability_event["summon_hex"] = extra["summon_hex"]
+	if result.has("target_id"):
+		ability_event["target_id"] = result["target_id"]
+		var ability_target: UnitBase = _find_unit(result["target_id"])
+		if ability_target != null:
+			ability_event["target_killed"] = not ability_target.is_alive
+	if result.has("damage"):
+		ability_event["damage"] = result["damage"]
+	if result.has("healed_unit_ids"):
+		ability_event["healed_unit_ids"] = result["healed_unit_ids"]
+	_emit_combat_event("ability", ability_event)
 	turn_manager.spend_action()
 	_after_action_spent(player_id)
 	action_log.emit(result.get("message", "Ability used."))
@@ -353,15 +396,21 @@ func _after_action_spent(player_id: int) -> void:
 		state_changed.emit()
 
 
-func _can_move_unit(unit: UnitBase, target: Vector2i) -> bool:
+func _can_move_unit(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> bool:
 	if target == unit.hex_position:
 		return true
 	if not grid.has_tile(target):
 		return false
 	if _blocks_movement_at(target):
 		return false
-	if get_unit_at(target) != null:
-		return false
+	var occupant: UnitBase = get_unit_at(target)
+	if occupant != null:
+		if pending_moves.has(occupant.id):
+			var occupant_dest: Vector2i = pending_moves[occupant.id]
+			if occupant_dest == target:
+				return false
+		else:
+			return false
 	var dist: int = _movement_distance(unit.hex_position, target)
 	return dist >= 0 and dist <= unit.move_range
 
@@ -435,6 +484,28 @@ func _find_unit(unit_id: String) -> UnitBase:
 		if u.id == unit_id:
 			return u
 	return null
+
+
+func perform_minion_attack(minion: UnitBase, target: UnitBase) -> Dictionary:
+	if minion == null or target == null:
+		return _fail("Unit not found.")
+	if not minion.can_attack(target, func(a, b): return has_line_of_sight(a, b)):
+		return _fail("Invalid minion attack.")
+
+	var damage: int = minion.perform_basic_attack(target)
+	_emit_combat_event("attack", {
+		"attacker_id": minion.id,
+		"target_id": target.id,
+		"damage": damage,
+		"target_killed": not target.is_alive,
+	})
+	action_log.emit("%s hit %s for %d damage." % [minion.display_name, target.display_name, damage])
+	state_changed.emit()
+	return {"success": true, "damage": damage}
+
+
+func _emit_combat_event(event_type: String, data: Dictionary) -> void:
+	combat_event.emit(event_type, data)
 
 
 func _check_win() -> void:

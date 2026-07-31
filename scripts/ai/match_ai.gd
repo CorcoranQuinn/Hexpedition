@@ -107,10 +107,10 @@ static func _try_move(match_ctrl: MatchController, player_id: int) -> bool:
 static func _minion_attack(match_ctrl: MatchController, minion: UnitBase) -> bool:
 	for enemy in match_ctrl.get_enemies_of(minion.owner_id):
 		if minion.can_attack(enemy, func(a, b): return match_ctrl.has_line_of_sight(a, b)):
-			minion.perform_basic_attack(enemy)
-			match_ctrl.action_log.emit("%s attacked %s." % [minion.display_name, enemy.display_name])
-			match_ctrl.state_changed.emit()
-			return true
+			var result: Dictionary = match_ctrl.perform_minion_attack(minion, enemy)
+			if result.get("success", false):
+				match_ctrl._check_win()
+				return true
 	return false
 
 

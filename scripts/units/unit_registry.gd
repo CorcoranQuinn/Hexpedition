@@ -59,11 +59,17 @@ class SentinelLeaderUnit extends UnitBase:
 	func use_ability(context: Dictionary) -> Dictionary:
 		var allies: Array = context.get("allies", [])
 		var healed: int = 0
+		var healed_ids: Array[String] = []
 		for ally in allies:
 			if ally.owner_id == owner_id and ally.is_alive:
 				ally.heal(2)
 				healed += 1
-		return {"success": true, "message": "Bulwark Pulse healed %d allies." % healed}
+				healed_ids.append(ally.id)
+		return {
+			"success": true,
+			"message": "Bulwark Pulse healed %d allies." % healed,
+			"healed_unit_ids": healed_ids,
+		}
 
 	func get_ability_description() -> String:
 		return "Bulwark Pulse (3 RP): Heal all allied units by 2."
@@ -217,7 +223,12 @@ class EmberFollowerUnit extends UnitBase:
 		if target == null or not can_attack(target, los_check):
 			return {"success": false, "message": "No valid target in range."}
 		var dmg: int = perform_basic_attack(target)
-		return {"success": true, "message": "Double Strike dealt %d damage." % dmg}
+		return {
+			"success": true,
+			"message": "Double Strike dealt %d damage." % dmg,
+			"target_id": target.id,
+			"damage": dmg,
+		}
 
 	func get_ability_description() -> String:
 		return "Double Strike (2 RP): Immediately perform a basic attack."
