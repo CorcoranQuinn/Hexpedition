@@ -225,7 +225,6 @@ func _execute_action(action_type: String, payload: Dictionary) -> Dictionary:
 		"tile":
 			return match_ctrl.perform_tile_interact(pid, payload.get("unit_id", ""))
 		"end_turn":
-			var pid: int = payload.get("player_id", _get_active_player_id())
 			match_ctrl.end_turn_with_minions(pid)
 			return {"success": true}
 	return {"success": false, "message": "Unknown action."}
