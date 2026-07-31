@@ -19,6 +19,19 @@ extends Control
 const HEX_SIZE: float = 36.0
 const BattleEffectsScript = preload("res://scripts/ui/battle_effects.gd")
 
+# --- Isometric projection & camera ---
+## The board is drawn on a squashed, rotatable ground plane while units stay
+## upright, which gives a 2.5D look without needing real 3D assets.
+const ISO_SQUASH: float = 0.58  ## Vertical foreshortening of the ground plane.
+const CAMERA_ROTATION_STEP: float = PI / 3.0  ## 60 degrees — one hex face per press.
+const CAMERA_TWEEN_TIME: float = 0.3
+const UNIT_DEPTH_RANGE: int = 40  ## Largest z offset a unit may take from screen depth.
+
+# --- Leader health panel layout (kept clear of the right-hand sidebar) ---
+const SIDEBAR_WIDTH: float = 320.0
+const LEADER_PANEL_WIDTH: float = 236.0
+const LEADER_PANEL_MARGIN: float = 16.0
+
 # --- Match state (rules live in MatchController; UI keeps selection & modes) ---
 var match_ctrl: MatchController = MatchController.new()
 var _selected_unit: UnitBase = null  ## Inspected unit; also the actor during action modes.
@@ -38,6 +51,23 @@ var _hovered_hex: Vector2i = Vector2i(999999, 999999)
 var _move_animating: bool = false
 var _suppress_position_snap: Dictionary = {}  ## During move tween, don't snap unit nodes.
 var _unit_actions_box: VBoxContainer  ## Quick-action buttons for the selected friendly unit.
+
+# --- Camera state (see ISO_SQUASH notes above) ---
+var _ground_layer: Node2D  ## Applies the isometric squash in screen space.
+var _ground_pivot: Node2D  ## Applies camera yaw; tiles and move paths live here.
+var _actor_layer: Node2D  ## Upright billboards (units, VFX) at projected positions.
+var _base_yaw_by_player: Array[float] = [0.0, 0.0]  ## Yaw that puts each side nearest the camera.
+var _manual_yaw: float = 0.0  ## Player-applied offset from the base angle.
+var _camera_owner_id: int = -1  ## Whose side the camera is currently behind.
+var _iso_enabled: bool = true
+var _camera_tween: Tween
+var _synced_yaw: float = INF  ## Guards against re-projecting when nothing moved.
+var _synced_squash: float = INF
+
+# --- Leader health bars (supports teams with any number of leaders) ---
+var _player_leader_box: VBoxContainer
+var _enemy_leader_box: VBoxContainer
+var _leader_rows: Dictionary = {}  ## unit_id -> { panel, name, bar, fill, color }
 
 # --- Move path preview colors ---
 const PATH_COLOR_CONFIRMED := Color(0.35, 0.85, 0.95, 0.9)
@@ -64,20 +94,28 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/character_select.tscn")
 		return
 
-	var seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
-	match_ctrl.setup_match(seed)
+	# Layers must exist before setup_match, whose state_changed signal already
+	# triggers a refresh that spawns unit visuals into the actor layer.
+	_setup_board_layers()
+
+	var match_seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
+	match_ctrl.setup_match(match_seed)
 	_connect_turn_signals()
 	_build_board_visuals()
 	_path_overlay = Node2D.new()
 	_path_overlay.name = "MovePathOverlay"
 	_path_overlay.z_index = 4
-	board_root.add_child(_path_overlay)
+	_ground_pivot.add_child(_path_overlay)
 	_battle_effects = BattleEffectsScript.new()
 	_battle_effects.setup(HEX_SIZE)
-	_battle_effects.z_index = 10
-	board_root.add_child(_battle_effects)
+	_battle_effects.z_index = 60
+	_actor_layer.add_child(_battle_effects)
 	_setup_tile_tooltip()
 	_setup_unit_action_panel()
+	_setup_camera_controls()
+	_setup_leader_panels()
+	_cache_base_yaws()
+	_update_camera_for_active_player(false)
 	_refresh_ui()
 	set_process(true)
 
@@ -97,11 +135,45 @@ func _on_player_changed(_player_id: int) -> void:
 	_update_move_button_label()
 	_clear_move_paths()
 	_update_unit_visual_states()
+	# Hot-seat play swaps whose side the camera sits behind.
+	_update_camera_for_active_player(true)
+
+
+# --- Board layers: a squashed, rotatable ground plane plus upright actors ---
+## Screen position = squash * yaw * board position, so the ground tilts away
+## while units and effects stay readable at their projected spot.
+func _setup_board_layers() -> void:
+	_ground_layer = Node2D.new()
+	_ground_layer.name = "GroundLayer"
+	_ground_layer.scale = Vector2(1.0, ISO_SQUASH)
+	board_root.add_child(_ground_layer)
+
+	_ground_pivot = Node2D.new()
+	_ground_pivot.name = "GroundPivot"
+	_ground_layer.add_child(_ground_pivot)
+
+	_actor_layer = Node2D.new()
+	_actor_layer.name = "ActorLayer"
+	# Must exceed UNIT_DEPTH_RANGE so that even the farthest unit, which takes
+	# the most negative depth offset, still sorts above the ground plane.
+	_actor_layer.z_index = 50
+	board_root.add_child(_actor_layer)
+
+
+func _project_point(board_point: Vector2) -> Vector2:
+	var turned: Vector2 = board_point.rotated(_ground_pivot.rotation)
+	return Vector2(turned.x, turned.y * _ground_layer.scale.y)
+
+
+func _project_hex(hex: Vector2i) -> Vector2:
+	return _project_point(HexCoords.axial_to_pixel(hex, HEX_SIZE))
 
 
 # --- Procedural board rendering (hex tiles + unit triangles) ---
 func _build_board_visuals() -> void:
-	for child in board_root.get_children():
+	for child in _ground_pivot.get_children():
+		child.queue_free()
+	for child in _actor_layer.get_children():
 		child.queue_free()
 	_tile_nodes.clear()
 	_unit_nodes.clear()
@@ -109,7 +181,7 @@ func _build_board_visuals() -> void:
 	for hex in match_ctrl.grid.get_all_hexes():
 		var tile: TileBase = match_ctrl.grid.get_tile(hex)
 		var poly := _make_hex_polygon(tile)
-		board_root.add_child(poly)
+		_ground_pivot.add_child(poly)
 		_tile_nodes[hex] = poly
 
 	for unit in match_ctrl.units:
@@ -127,11 +199,17 @@ func _make_hex_polygon(tile: TileBase) -> Polygon2D:
 	poly.color = tile.get_revealed_color() if tile.revealed else Color(0.15, 0.16, 0.2)
 	poly.set_meta("hex", tile.hex_position)
 
+	# The anchor cancels the ground plane's yaw and squash so glyphs stay upright.
+	var anchor := Node2D.new()
+	anchor.name = "LabelAnchor"
+	poly.add_child(anchor)
+
 	var label := Label.new()
+	label.name = "TileLabel"
 	label.text = tile.get_hidden_label() if not tile.revealed else tile.display_name.substr(0, 1)
 	label.position = Vector2(-8, -10)
 	label.add_theme_font_size_override("font_size", 12)
-	poly.add_child(label)
+	anchor.add_child(label)
 	return poly
 
 
@@ -141,6 +219,14 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 
 	var container := Node2D.new()
 	container.set_meta("unit_id", unit.id)
+
+	# Squashed disc that grounds the upright billboard on the tilted plane.
+	var shadow := Polygon2D.new()
+	shadow.name = "Shadow"
+	shadow.polygon = _make_ellipse_points(15.0, 15.0 * ISO_SQUASH)
+	shadow.color = Color(0.0, 0.0, 0.0, 0.28)
+	shadow.position = Vector2(0, 9)
+	container.add_child(shadow)
 
 	var highlight := Polygon2D.new()
 	highlight.name = "Highlight"
@@ -167,16 +253,18 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 		body.scale = Vector2(0.65, 0.65)
 		highlight.scale = Vector2(0.65, 0.65)
 		outline.scale = Vector2(0.65, 0.65)
+		shadow.scale = Vector2(0.65, 0.65)
 	elif unit.is_leader:
 		body.scale = Vector2(1.3, 1.3)
 		highlight.scale = Vector2(1.3, 1.3)
 		outline.scale = Vector2(1.3, 1.3)
+		shadow.scale = Vector2(1.3, 1.3)
 	if unit.is_ai_controlled:
 		body.modulate = Color(0.9, 0.95, 0.9)
 	container.add_child(body)
 
-	container.position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
-	board_root.add_child(container)
+	_actor_layer.add_child(container)
+	_place_unit_node(container, unit.hex_position)
 	_unit_nodes[unit.id] = container
 	if animate_spawn:
 		container.scale = Vector2(0.2, 0.2)
@@ -184,16 +272,32 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 		pop.tween_property(container, "scale", Vector2.ONE, 0.28).set_trans(Tween.TRANS_BACK)
 
 
-func _make_unit_points(size: float) -> PackedVector2Array:
+func _make_unit_points(radius: float) -> PackedVector2Array:
 	return PackedVector2Array([
-		Vector2(0, -size), Vector2(size * 0.86, size * 0.72), Vector2(-size * 0.86, size * 0.72)
+		Vector2(0, -radius), Vector2(radius * 0.86, radius * 0.72), Vector2(-radius * 0.86, radius * 0.72)
 	])
 
 
-func _make_unit_line_points(size: float) -> PackedVector2Array:
+func _make_unit_line_points(radius: float) -> PackedVector2Array:
 	return PackedVector2Array([
-		Vector2(0, -size), Vector2(size * 0.86, size * 0.72), Vector2(-size * 0.86, size * 0.72), Vector2(0, -size)
+		Vector2(0, -radius), Vector2(radius * 0.86, radius * 0.72), Vector2(-radius * 0.86, radius * 0.72), Vector2(0, -radius)
 	])
+
+
+func _make_ellipse_points(radius_x: float, radius_y: float, segments: int = 18) -> PackedVector2Array:
+	var points: PackedVector2Array = PackedVector2Array()
+	for i in segments:
+		var angle: float = TAU * float(i) / float(segments)
+		points.append(Vector2(cos(angle) * radius_x, sin(angle) * radius_y))
+	return points
+
+
+## Units are billboards: placed at the projected hex, but never squashed or
+## rotated. Depth sorting uses screen Y so nearer units overlap farther ones.
+func _place_unit_node(node: Node2D, hex: Vector2i) -> void:
+	var pos: Vector2 = _project_hex(hex)
+	node.position = pos
+	node.z_index = clampi(int(round(pos.y / 8.0)), -UNIT_DEPTH_RANGE, UNIT_DEPTH_RANGE)
 
 
 # --- Hover highlight + selection outline on unit visuals ---
@@ -229,6 +333,7 @@ func _refresh_ui() -> void:
 	_update_move_button_label()
 	_update_action_buttons()
 	_update_unit_info_panel()
+	_refresh_leader_panels()
 
 
 func _update_board_colors() -> void:
@@ -236,7 +341,7 @@ func _update_board_colors() -> void:
 		var tile: TileBase = match_ctrl.grid.get_tile(hex)
 		var poly: Polygon2D = _tile_nodes[hex]
 		poly.color = tile.get_revealed_color() if tile.revealed else Color(0.15, 0.16, 0.2)
-		var lbl: Label = poly.get_child(0) as Label
+		var lbl: Label = poly.get_node_or_null("LabelAnchor/TileLabel") as Label
 		if lbl:
 			lbl.text = tile.get_hidden_label() if not tile.revealed else tile.display_name.substr(0, 1)
 
@@ -257,7 +362,7 @@ func _update_unit_positions() -> void:
 		if not _unit_nodes.has(unit.id):
 			_spawn_unit_visual(unit, true)
 		else:
-			_unit_nodes[unit.id].position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
+			_place_unit_node(_unit_nodes[unit.id], unit.hex_position)
 
 
 func _update_action_buttons() -> void:
@@ -428,11 +533,13 @@ func _animate_unit_paths(anims: Array) -> void:
 		if not _unit_nodes.has(unit_id) or path.size() < 2:
 			continue
 		var node: Node2D = _unit_nodes[unit_id]
-		node.position = HexCoords.axial_to_pixel(path[0], HEX_SIZE)
+		node.position = _project_hex(path[0])
 		var tween := create_tween()
 		for i in range(1, path.size()):
-			var target_pos: Vector2 = HexCoords.axial_to_pixel(path[i], HEX_SIZE)
+			var step_hex: Vector2i = path[i]
+			var target_pos: Vector2 = _project_hex(step_hex)
 			tween.tween_property(node, "position", target_pos, STEP_TIME)
+			tween.tween_callback(func() -> void: _place_unit_node(node, step_hex))
 		tweens.append(tween)
 	for tween in tweens:
 		await tween.finished
@@ -455,11 +562,12 @@ func _update_move_button_label() -> void:
 
 # --- Per-frame hover: unit highlight, tile tooltip, move path preview ---
 func _process(_delta: float) -> void:
+	_sync_camera_dependent_visuals()
 	if _ai_running or _match_ending or _move_animating:
 		if _match_ending:
 			_tile_tooltip.visible = false
 		return
-	var hex: Vector2i = _pixel_to_hex(get_local_mouse_position())
+	var hex: Vector2i = _hex_under_mouse()
 	var hovered_id: String = ""
 	if match_ctrl.grid.has_tile(hex):
 		var unit: UnitBase = match_ctrl.get_unit_at(hex)
@@ -484,10 +592,21 @@ func _process(_delta: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_Q:
+				_rotate_camera(-1)
+				return
+			KEY_E:
+				_rotate_camera(1)
+				return
+			KEY_R:
+				_reset_camera_view()
+				return
 	if _match_ending or _move_animating:
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var hex: Vector2i = _pixel_to_hex(get_local_mouse_position())
+		var hex: Vector2i = _hex_under_mouse()
 		if not match_ctrl.grid.has_tile(hex):
 			return
 		_handle_hex_click(hex)
@@ -855,9 +974,12 @@ func _format_unit(unit: UnitBase) -> String:
 
 
 # --- Mouse position -> axial hex (inverse of HexCoords.axial_to_pixel) ---
-func _pixel_to_hex(pixel: Vector2) -> Vector2i:
-	var board_pos: Vector2 = pixel - board_root.position
-	# Rough inverse of axial_to_pixel
+## Reading the mouse in the pivot's own space undoes the board offset, camera
+## yaw, and isometric squash in one step, so picking survives any camera angle.
+func _hex_under_mouse() -> Vector2i:
+	if _ground_pivot == null:
+		return Vector2i(999999, 999999)
+	var board_pos: Vector2 = _ground_pivot.get_local_mouse_position()
 	var q: float = (sqrt(3.0) / 3.0 * board_pos.x - 1.0 / 3.0 * board_pos.y) / HEX_SIZE
 	var r: float = (2.0 / 3.0 * board_pos.y) / HEX_SIZE
 	return HexCoords.round_axial(q, r)
@@ -867,12 +989,324 @@ func _append_log(msg: String) -> void:
 	log_label.text = msg
 
 
+# --- Camera: orient behind the viewing player's side, allow manual rotation ---
+
+## Angle that swings a player's starting corner toward the bottom of the
+## screen, so "your" side is always the near edge of the board.
+func _compute_base_yaw(player_id: int) -> float:
+	var centroid: Vector2 = Vector2.ZERO
+	var count: int = 0
+	for unit in match_ctrl.units:
+		if unit.owner_id == player_id:
+			centroid += HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
+			count += 1
+	if count == 0:
+		return 0.0
+	centroid /= float(count)
+	if centroid.length_squared() < 0.01:
+		return 0.0
+	return PI / 2.0 - centroid.angle()
+
+
+## Cached from spawn positions, since units drift once the match is underway.
+func _cache_base_yaws() -> void:
+	for pid in 2:
+		_base_yaw_by_player[pid] = _compute_base_yaw(pid)
+
+
+func _update_camera_for_active_player(animate: bool) -> void:
+	var viewer: int = _get_active_player_id()
+	if viewer < 0 or viewer >= _base_yaw_by_player.size():
+		return
+	if viewer == _camera_owner_id:
+		return
+	_camera_owner_id = viewer
+	_apply_camera_orientation(animate)
+
+
+func _apply_camera_orientation(animate: bool) -> void:
+	if _ground_pivot == null:
+		return
+	var base_yaw: float = 0.0
+	if _camera_owner_id >= 0 and _camera_owner_id < _base_yaw_by_player.size():
+		base_yaw = _base_yaw_by_player[_camera_owner_id]
+	var target_yaw: float = base_yaw + _manual_yaw
+	var target_squash: float = ISO_SQUASH if _iso_enabled else 1.0
+
+	if _camera_tween != null and _camera_tween.is_valid():
+		_camera_tween.kill()
+	if not animate:
+		_ground_pivot.rotation = target_yaw
+		_ground_layer.scale.y = target_squash
+		_sync_camera_dependent_visuals()
+		return
+
+	_camera_tween = create_tween()
+	_camera_tween.set_parallel(true)
+	_camera_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_camera_tween.tween_property(_ground_pivot, "rotation", target_yaw, CAMERA_TWEEN_TIME)
+	_camera_tween.tween_property(_ground_layer, "scale:y", target_squash, CAMERA_TWEEN_TIME)
+
+
+func _rotate_camera(direction: int) -> void:
+	if _match_ending or _move_animating:
+		return
+	_manual_yaw += CAMERA_ROTATION_STEP * float(direction)
+	_apply_camera_orientation(true)
+
+
+func _reset_camera_view() -> void:
+	if _match_ending or _move_animating:
+		return
+	_manual_yaw = 0.0
+	_apply_camera_orientation(true)
+
+
+func _toggle_isometric(enabled: bool) -> void:
+	_iso_enabled = enabled
+	_apply_camera_orientation(true)
+
+
+## Tiles ride the ground plane, but their glyphs and the unit billboards must
+## be re-derived whenever the camera moves.
+func _sync_camera_dependent_visuals() -> void:
+	if _ground_pivot == null or _ground_layer == null:
+		return
+	var yaw: float = _ground_pivot.rotation
+	var squash: float = _ground_layer.scale.y
+	if is_equal_approx(yaw, _synced_yaw) and is_equal_approx(squash, _synced_squash):
+		return
+	_synced_yaw = yaw
+	_synced_squash = squash
+
+	var inverse_squash: float = 1.0 / maxf(squash, 0.05)
+	for hex in _tile_nodes:
+		var anchor: Node2D = _tile_nodes[hex].get_node_or_null("LabelAnchor") as Node2D
+		if anchor != null:
+			anchor.rotation = -yaw
+			anchor.scale = Vector2(1.0, inverse_squash)
+
+	for unit in match_ctrl.units:
+		if not _unit_nodes.has(unit.id) or _suppress_position_snap.has(unit.id):
+			continue
+		_place_unit_node(_unit_nodes[unit.id], unit.hex_position)
+
+
+func _setup_camera_controls() -> void:
+	var sidebar: Node = rp_label.get_parent()
+	var box := VBoxContainer.new()
+	box.name = "CameraControls"
+	box.add_theme_constant_override("separation", 4)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	row.add_child(_make_camera_button("Rotate L", "Rotate the board counter-clockwise (Q).", _rotate_camera.bind(-1)))
+	row.add_child(_make_camera_button("Rotate R", "Rotate the board clockwise (E).", _rotate_camera.bind(1)))
+	row.add_child(_make_camera_button("Reset", "Face your own side again (R).", _reset_camera_view))
+	box.add_child(row)
+
+	var iso_toggle := CheckButton.new()
+	iso_toggle.text = "Isometric View"
+	iso_toggle.tooltip_text = "Toggle between the tilted board and a flat top-down view."
+	iso_toggle.button_pressed = _iso_enabled
+	iso_toggle.toggled.connect(_toggle_isometric)
+	box.add_child(iso_toggle)
+
+	sidebar.add_child(box)
+	sidebar.move_child(box, rp_label.get_index() + 1)
+
+
+func _make_camera_button(text: String, hint: String, callback: Callable) -> Button:
+	var btn := Button.new()
+	btn.text = text
+	btn.tooltip_text = hint
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.pressed.connect(callback)
+	return btn
+
+
+# --- Leader health readouts: yours bottom-left, the enemy's top-right ---
+## Both panels list every leader a team fields, so rosters with more than one
+## leader (or none) render without special-casing.
+func _setup_leader_panels() -> void:
+	_player_leader_box = _make_leader_panel_container(false)
+	_enemy_leader_box = _make_leader_panel_container(true)
+
+
+func _make_leader_panel_container(is_enemy: bool) -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.name = "EnemyLeaderPanel" if is_enemy else "PlayerLeaderPanel"
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.z_index = 200
+	box.add_theme_constant_override("separation", 6)
+
+	# Zero-height anchors plus a growth direction let the box expand to fit
+	# however many leaders the team has.
+	if is_enemy:
+		box.anchor_left = 1.0
+		box.anchor_right = 1.0
+		box.anchor_top = 0.0
+		box.anchor_bottom = 0.0
+		box.offset_right = -(SIDEBAR_WIDTH + LEADER_PANEL_MARGIN)
+		box.offset_left = box.offset_right - LEADER_PANEL_WIDTH
+		box.offset_top = LEADER_PANEL_MARGIN
+		box.offset_bottom = LEADER_PANEL_MARGIN
+		box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+		box.grow_vertical = Control.GROW_DIRECTION_END
+	else:
+		box.anchor_left = 0.0
+		box.anchor_right = 0.0
+		box.anchor_top = 1.0
+		box.anchor_bottom = 1.0
+		box.offset_left = LEADER_PANEL_MARGIN
+		box.offset_right = LEADER_PANEL_MARGIN + LEADER_PANEL_WIDTH
+		box.offset_top = -LEADER_PANEL_MARGIN
+		box.offset_bottom = -LEADER_PANEL_MARGIN
+		box.grow_horizontal = Control.GROW_DIRECTION_END
+		box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+
+	add_child(box)
+	return box
+
+
+func _get_leaders_for_player(player_id: int) -> Array[UnitBase]:
+	var leaders: Array[UnitBase] = []
+	for unit in match_ctrl.units:
+		if unit.owner_id == player_id and unit.is_leader:
+			leaders.append(unit)
+	return leaders
+
+
+func _refresh_leader_panels() -> void:
+	var viewer: int = _get_active_player_id()
+	if viewer < 0:
+		viewer = 0
+	_populate_leader_panel(_player_leader_box, viewer)
+	_populate_leader_panel(_enemy_leader_box, 1 - viewer)
+
+
+func _populate_leader_panel(box: VBoxContainer, player_id: int) -> void:
+	if box == null:
+		return
+	var leaders: Array[UnitBase] = _get_leaders_for_player(player_id)
+
+	# Fallen leaders stay listed, so the roster only changes on rebuild.
+	var ids: PackedStringArray = PackedStringArray()
+	for leader in leaders:
+		ids.append(leader.id)
+	var signature: String = "%d|%s" % [player_id, "|".join(ids)]
+	if str(box.get_meta("signature", "")) != signature:
+		_rebuild_leader_panel(box, player_id, leaders)
+		box.set_meta("signature", signature)
+
+	for leader in leaders:
+		if _leader_rows.has(leader.id):
+			_update_leader_row(_leader_rows[leader.id], leader)
+
+
+func _rebuild_leader_panel(box: VBoxContainer, player_id: int, leaders: Array[UnitBase]) -> void:
+	for child in box.get_children():
+		var child_id: String = str(child.get_meta("unit_id", ""))
+		if child_id != "":
+			_leader_rows.erase(child_id)
+		box.remove_child(child)
+		child.queue_free()
+
+	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[player_id])
+	box.add_child(_make_leader_header(player_id, team))
+	for leader in leaders:
+		box.add_child(_make_leader_row(leader, team.team_color))
+
+
+func _make_leader_header(player_id: int, team: TeamDefinition) -> Label:
+	var header := Label.new()
+	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	header.text = "%s — %s" % [NetworkManager.get_display_name(player_id), team.team_name]
+	header.add_theme_font_size_override("font_size", 13)
+	header.add_theme_color_override("font_color", team.team_color)
+	return header
+
+
+func _make_leader_row(leader: UnitBase, team_color: Color) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.set_meta("unit_id", leader.id)
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.06, 0.07, 0.1, 0.8)
+	style.border_color = Color(team_color, 0.7)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(4)
+	style.set_content_margin_all(6)
+	panel.add_theme_stylebox_override("panel", style)
+
+	var vbox := VBoxContainer.new()
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_theme_constant_override("separation", 3)
+	panel.add_child(vbox)
+
+	var name_label := Label.new()
+	name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	name_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(name_label)
+
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = team_color
+	fill.set_corner_radius_all(3)
+
+	var background := StyleBoxFlat.new()
+	background.bg_color = Color(0.11, 0.12, 0.15)
+	background.set_corner_radius_all(3)
+
+	var bar := ProgressBar.new()
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.show_percentage = false
+	bar.custom_minimum_size = Vector2(0, 12)
+	bar.add_theme_stylebox_override("background", background)
+	bar.add_theme_stylebox_override("fill", fill)
+	vbox.add_child(bar)
+
+	_leader_rows[leader.id] = {
+		"panel": panel,
+		"name": name_label,
+		"bar": bar,
+		"fill": fill,
+		"color": team_color,
+	}
+	return panel
+
+
+func _update_leader_row(row: Dictionary, leader: UnitBase) -> void:
+	var panel: PanelContainer = row["panel"]
+	var name_label: Label = row["name"]
+	var bar: ProgressBar = row["bar"]
+	var fill: StyleBoxFlat = row["fill"]
+	var team_color: Color = row["color"]
+
+	bar.max_value = maxi(1, leader.max_health)
+	bar.value = leader.health
+
+	if not leader.is_alive:
+		name_label.text = "%s — DEFEATED" % leader.display_name
+		fill.bg_color = Color(0.3, 0.3, 0.34)
+		panel.modulate = Color(0.6, 0.6, 0.65)
+		return
+
+	name_label.text = "%s   %d / %d" % [leader.display_name, leader.health, leader.max_health]
+	panel.modulate = Color.WHITE
+	# Bleed the fill toward red as the leader nears defeat.
+	var ratio: float = float(leader.health) / float(maxi(1, leader.max_health))
+	var danger: float = clampf(inverse_lerp(0.55, 0.15, ratio), 0.0, 1.0)
+	fill.bg_color = team_color.lerp(Color(0.9, 0.2, 0.2), danger)
+
+
 # --- Tile hover tooltip (name + effect for revealed/hidden tiles) ---
 func _setup_tile_tooltip() -> void:
 	_tile_tooltip = PanelContainer.new()
 	_tile_tooltip.visible = false
 	_tile_tooltip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_tile_tooltip.z_index = 20
+	_tile_tooltip.z_index = 300
 	add_child(_tile_tooltip)
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 8)
@@ -936,12 +1370,12 @@ func _update_move_path_preview(hover_hex: Vector2i) -> void:
 
 	if _selected_unit != null:
 		var preview_dest: Vector2i = hover_hex
-		var duplicate: bool = false
+		var is_taken: bool = false
 		for uid in _move_targets:
 			if uid != _selected_unit.id and _move_targets[uid] == preview_dest:
-				duplicate = true
+				is_taken = true
 				break
-		if not duplicate and preview_dest != _selected_unit.hex_position:
+		if not is_taken and preview_dest != _selected_unit.hex_position:
 			if match_ctrl.can_move_unit_to(_selected_unit, preview_dest, _move_targets):
 				var preview_path: Array[Vector2i] = match_ctrl.find_movement_path(
 					_selected_unit, preview_dest, _move_targets
@@ -1016,6 +1450,10 @@ func _on_combat_event(event_type: String, data: Dictionary) -> void:
 			if not _unit_nodes.has(unit_id):
 				return
 			var center: Vector2 = _unit_nodes[unit_id].position
+			# Summon bursts need the projected hex, not raw board coordinates.
+			var summon_hex: Variant = data.get("summon_hex")
+			if summon_hex is Vector2i and summon_hex != Vector2i(-999, -999):
+				data["summon_pos"] = _project_hex(summon_hex)
 			_battle_effects.play_ability(
 				center,
 				data.get("ability_type", ""),
@@ -1043,7 +1481,7 @@ func _start_defeat_animation(unit_id: String) -> void:
 func _find_losing_leader_position(loser_id: int) -> Vector2:
 	for unit in match_ctrl.units:
 		if unit.owner_id == loser_id and unit.is_leader:
-			return HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
+			return _project_hex(unit.hex_position)
 	return Vector2.INF
 
 

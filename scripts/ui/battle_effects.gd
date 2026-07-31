@@ -70,10 +70,14 @@ func play_ability(
 		"veil_follower":
 			_play_buff_ring(center, Color(0.45, 0.95, 0.85))
 		"swarm_leader", "swarm_follower":
+			# The board supplies summon_pos already projected into view space;
+			# fall back to flat board coordinates if it was omitted.
+			var summon_pos: Variant = extra.get("summon_pos")
 			var summon_hex: Variant = extra.get("summon_hex")
-			if summon_hex is Vector2i and summon_hex != Vector2i(-999, -999):
-				var summon_pos: Vector2 = HexCoords.axial_to_pixel(summon_hex, _hex_size)
+			if summon_pos is Vector2:
 				_play_summon_burst(summon_pos)
+			elif summon_hex is Vector2i and summon_hex != Vector2i(-999, -999):
+				_play_summon_burst(HexCoords.axial_to_pixel(summon_hex, _hex_size))
 			else:
 				_play_buff_ring(center, Color(0.65, 0.35, 0.95))
 		_:
@@ -120,6 +124,9 @@ func play_match_end(
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	overlay.color = Color(0.02, 0.02, 0.06, 0.0)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	# Board actors use raised z_index for depth sorting, so the overlay has to
+	# sit above them rather than relying on tree order.
+	overlay.z_index = 400
 	parent_ui.add_child(overlay)
 	parent_ui.move_child(overlay, -1)
 
