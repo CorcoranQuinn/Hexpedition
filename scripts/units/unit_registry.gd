@@ -15,6 +15,8 @@ static var _factories: Dictionary = {
 }
 
 
+# --- Factory: create roster units or summoned minions with stable ids ---
+
 static func create(type_id: String, owner_id: int, team_id: int, unit_index: int) -> UnitBase:
 	if not _factories.has(type_id):
 		push_warning("Unknown unit type: %s" % type_id)

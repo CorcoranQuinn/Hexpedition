@@ -5,6 +5,8 @@ extends RefCounted
 const MAX_MINIONS_PER_PLAYER: int = 4
 
 
+# --- Opponent turn AI (solo mode): attack > summon > ability > move ---
+
 static func pick_random_team_id(exclude: int = -1) -> int:
 	return TeamRegistry.pick_random_team_id(exclude)
 
@@ -22,6 +24,8 @@ static func run_turn(match_ctrl: MatchController, player_id: int) -> void:
 		_force_end_turn(match_ctrl)
 
 
+# --- End-of-turn minion phase (AI-controlled units only) ---
+
 static func run_minions(match_ctrl: MatchController, player_id: int) -> void:
 	for unit in match_ctrl.units:
 		if not unit.is_alive or unit.owner_id != player_id or not unit.is_ai_controlled:
@@ -31,6 +35,8 @@ static func run_minions(match_ctrl: MatchController, player_id: int) -> void:
 			continue
 		_minion_move_toward_enemy(match_ctrl, unit)
 
+
+# --- Turn action priorities (each returns true if it spent an AP) ---
 
 static func _try_attack(match_ctrl: MatchController, player_id: int) -> bool:
 	var best_attacker: UnitBase = null
@@ -127,6 +133,8 @@ static func _try_move(match_ctrl: MatchController, player_id: int) -> bool:
 	return result.get("success", false)
 
 
+# --- Minion behavior (free attacks/movement at end of owner turn) ---
+
 static func _minion_attack(match_ctrl: MatchController, minion: UnitBase) -> bool:
 	for enemy in match_ctrl.get_enemies_of(minion.owner_id):
 		if minion.can_attack(enemy, func(a, b): return match_ctrl.has_line_of_sight(a, b)):
@@ -150,6 +158,8 @@ static func _minion_move_toward_enemy(match_ctrl: MatchController, minion: UnitB
 	match_ctrl.action_log.emit("%s moved toward the enemy." % minion.display_name)
 	match_ctrl.state_changed.emit()
 
+
+# --- Pathfinding heuristics (move toward nearest enemy, summon adjacent hex) ---
 
 static func _best_move_toward(match_ctrl: MatchController, unit: UnitBase, enemies: Array[UnitBase]) -> Vector2i:
 	var best_hex: Vector2i = unit.hex_position

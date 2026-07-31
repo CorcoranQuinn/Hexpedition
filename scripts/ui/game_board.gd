@@ -1,5 +1,8 @@
 extends Control
+## Main in-match UI: renders the hex board, handles player input, and bridges
+## MatchController rules to visuals (units, paths, tooltips, combat effects).
 
+# --- Scene references (sidebar + board root from game_board.tscn) ---
 @onready var board_root: Node2D = %BoardRoot
 @onready var turn_label: Label = %TurnLabel
 @onready var actions_label: Label = %ActionsLabel
@@ -12,31 +15,35 @@ extends Control
 @onready var end_turn_button: Button = %EndTurnButton
 @onready var unit_info: Label = %UnitInfo
 
+# --- Constants & preloads ---
 const HEX_SIZE: float = 36.0
 const BattleEffectsScript = preload("res://scripts/ui/battle_effects.gd")
 
+# --- Match state (rules live in MatchController; UI keeps selection & modes) ---
 var match_ctrl: MatchController = MatchController.new()
-var _selected_unit: UnitBase = null
-var _action_mode: String = ""
-var _move_targets: Dictionary = {}
-var _tile_nodes: Dictionary = {}
-var _unit_nodes: Dictionary = {}
+var _selected_unit: UnitBase = null  ## Inspected unit; also the actor during action modes.
+var _action_mode: String = ""  ## "", "move", "attack", "ability", or "tile".
+var _move_targets: Dictionary = {}  ## Pending batch move: unit_id -> destination hex.
+var _tile_nodes: Dictionary = {}  ## hex -> Polygon2D visual
+var _unit_nodes: Dictionary = {}  ## unit_id -> Node2D container (body, highlight, outline)
 var _ai_running: bool = false
 var _hovered_unit_id: String = ""
 var _battle_effects: BattleEffectsScript
-var _units_dying: Dictionary = {}
+var _units_dying: Dictionary = {}  ## Units waiting for defeat animation before removal.
 var _match_ending: bool = false
-var _path_overlay: Node2D
-var _tile_tooltip: PanelContainer
+var _path_overlay: Node2D  ## Draws move path lines/arrows above tiles.
+var _tile_tooltip: PanelContainer  ## Follows cursor with tile name/effect on hover.
 var _tile_tooltip_label: Label
 var _hovered_hex: Vector2i = Vector2i(999999, 999999)
 var _move_animating: bool = false
-var _suppress_position_snap: Dictionary = {}
+var _suppress_position_snap: Dictionary = {}  ## During move tween, don't snap unit nodes.
+var _unit_actions_box: VBoxContainer  ## Quick-action buttons for the selected friendly unit.
 
-const PATH_COLOR_CONFIRMED := Color(0.35, 0.85, 0.95, 0.9)
+# --- Move path preview colors ---
 const PATH_COLOR_PREVIEW := Color(1.0, 0.92, 0.45, 0.75)
 
 
+# --- Lifecycle: wire signals, start or resume match, build visuals ---
 func _ready() -> void:
 	move_button.pressed.connect(_set_mode.bind("move"))
 	attack_button.pressed.connect(_set_mode.bind("attack"))
@@ -69,10 +76,12 @@ func _ready() -> void:
 	_battle_effects.z_index = 10
 	board_root.add_child(_battle_effects)
 	_setup_tile_tooltip()
+	_setup_unit_action_panel()
 	_refresh_ui()
 	set_process(true)
 
 
+# --- Turn flow callbacks ---
 func _connect_turn_signals() -> void:
 	if not match_ctrl.turn_manager.turn_started.is_connected(_on_turn_started):
 		match_ctrl.turn_manager.turn_started.connect(_on_turn_started)
@@ -81,7 +90,7 @@ func _connect_turn_signals() -> void:
 
 
 func _on_player_changed(_player_id: int) -> void:
-	_selected_unit = null
+	_deselect_unit()
 	_action_mode = ""
 	_move_targets.clear()
 	_update_move_button_label()
@@ -89,6 +98,7 @@ func _on_player_changed(_player_id: int) -> void:
 	_update_unit_visual_states()
 
 
+# --- Procedural board rendering (hex tiles + unit triangles) ---
 func _build_board_visuals() -> void:
 	for child in board_root.get_children():
 		child.queue_free()
@@ -185,6 +195,7 @@ func _make_unit_line_points(size: float) -> PackedVector2Array:
 	])
 
 
+# --- Hover highlight + selection outline on unit visuals ---
 func _update_unit_visual_states() -> void:
 	for unit_id in _unit_nodes:
 		var container: Node2D = _unit_nodes[unit_id]
@@ -196,6 +207,7 @@ func _update_unit_visual_states() -> void:
 			outline.visible = _selected_unit != null and _selected_unit.id == unit_id
 
 
+# --- Sidebar sync: turn counters, tile colors, unit positions, action buttons ---
 func _refresh_ui() -> void:
 	var pid: int = match_ctrl.turn_manager.current_player
 	if GameState.is_solo():
@@ -215,6 +227,7 @@ func _refresh_ui() -> void:
 	_update_unit_visual_states()
 	_update_move_button_label()
 	_update_action_buttons()
+	_update_unit_info_panel()
 
 
 func _update_board_colors() -> void:
@@ -260,6 +273,7 @@ func _update_action_buttons() -> void:
 	tile_button.text = "Tile Interact (1 AP)"
 
 
+# --- Who may click actions (solo human, hot-seat, or online local player) ---
 func _can_local_player_act() -> bool:
 	if GameState.is_solo():
 		return match_ctrl.turn_manager.current_player == 0 and match_ctrl.turn_manager.can_spend_action() and not _ai_running
@@ -269,6 +283,7 @@ func _can_local_player_act() -> bool:
 	return match_ctrl.turn_manager.current_player == local_id and match_ctrl.turn_manager.can_spend_action()
 
 
+# --- Solo AI: run opponent turn after a short delay ---
 func _on_turn_started(player_id: int) -> void:
 	_refresh_ui()
 	if GameState.is_solo() and player_id == GameState.get_ai_player_id():
@@ -309,6 +324,7 @@ func _ability_needs_target_selection(unit: UnitBase) -> bool:
 	return unit.ability_requires_enemy_target() or _is_summoner(unit)
 
 
+# --- Action mode selection (sidebar buttons); move button double-press confirms ---
 func _set_mode(mode: String) -> void:
 	if _action_mode == "move" and mode == "move":
 		_confirm_move()
@@ -324,6 +340,7 @@ func _set_mode(mode: String) -> void:
 		log_label.text = "Move each unit (0–range), then click Move again to confirm."
 
 
+# --- Batch move: plan destinations, validate, animate, then apply rules ---
 func _confirm_move() -> void:
 	if not _can_local_player_act() or _move_animating:
 		return
@@ -337,10 +354,9 @@ func _confirm_move() -> void:
 		return
 	_move_targets.clear()
 	_action_mode = ""
-	_selected_unit = null
+	_deselect_unit()
 	_update_move_button_label()
 	_clear_move_paths()
-	_update_unit_visual_states()
 	_run_move_action_async(moves)
 
 
@@ -428,6 +444,7 @@ func _find_unit_by_id(unit_id: String) -> UnitBase:
 	return null
 
 
+# --- Move button label reflects confirm state when destinations are queued ---
 func _update_move_button_label() -> void:
 	if _action_mode == "move" and not _move_targets.is_empty():
 		move_button.text = "Confirm Move (%d)" % _move_targets.size()
@@ -435,6 +452,7 @@ func _update_move_button_label() -> void:
 		move_button.text = "Move (1 AP, +1 RP)"
 
 
+# --- Per-frame hover: unit highlight, tile tooltip, move path preview ---
 func _process(_delta: float) -> void:
 	if _ai_running or _match_ending or _move_animating:
 		if _match_ending:
@@ -474,6 +492,7 @@ func _input(event: InputEvent) -> void:
 		_handle_hex_click(hex)
 
 
+# --- Dispatch player actions to MatchController (local rules authority) ---
 func _execute_action(action_type: String, payload: Dictionary) -> Dictionary:
 	var pid: int = payload.get("player_id", _get_active_player_id())
 	match action_type:
@@ -504,6 +523,7 @@ func _submit_action(action_type: String, payload: Dictionary) -> void:
 		log_label.text = result.get("message", "Action resolved.")
 
 
+# --- Online: host authoritative; moves get special animation sync path ---
 func _on_network_action(action_type: String, payload: Dictionary, result: Dictionary) -> void:
 	if action_type == "move":
 		var moves: Dictionary = payload.get("moves", {})
@@ -536,6 +556,7 @@ func _on_network_action(action_type: String, payload: Dictionary, result: Dictio
 		log_label.text = result.get("message", "Action resolved.")
 
 
+# --- Board clicks: behavior depends on current _action_mode ---
 func _handle_hex_click(hex: Vector2i) -> void:
 	if _ai_running or _match_ending or _move_animating:
 		return
@@ -548,14 +569,13 @@ func _handle_hex_click(hex: Vector2i) -> void:
 
 	match _action_mode:
 		"":
-			if clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
-				_selected_unit = clicked_unit
-				unit_info.text = _format_unit(clicked_unit)
-				_update_unit_visual_states()
+			if clicked_unit and clicked_unit.is_alive:
+				_select_unit(clicked_unit)
+			else:
+				_deselect_unit()
 		"move":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
-				_selected_unit = clicked_unit
-				unit_info.text = _format_unit(clicked_unit)
+				_select_unit(clicked_unit)
 				if _move_targets.has(clicked_unit.id):
 					log_label.text = "Re-select destination for %s." % clicked_unit.display_name
 				else:
@@ -572,25 +592,22 @@ func _handle_hex_click(hex: Vector2i) -> void:
 					return
 				_move_targets[_selected_unit.id] = hex
 				log_label.text = "%s destination set. Pick another unit or click Move to confirm." % _selected_unit.display_name
-				_selected_unit = null
+				_deselect_unit()
 				_update_move_button_label()
 				_update_move_path_preview(hex)
-				_update_unit_visual_states()
 		"attack":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
-				_selected_unit = clicked_unit
-				_update_unit_visual_states()
+				_select_unit(clicked_unit)
 			elif _selected_unit != null and clicked_unit and clicked_unit.owner_id != pid:
 				_submit_action("attack", {
 					"attacker_id": _selected_unit.id,
 					"target_id": clicked_unit.id,
 				})
-				_selected_unit = null
 				_action_mode = ""
-				_update_unit_visual_states()
+				_deselect_unit()
 		"ability":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
-				_selected_unit = clicked_unit
+				_select_unit(clicked_unit)
 				if _ability_needs_target_selection(_selected_unit):
 					if _is_summoner(_selected_unit):
 						log_label.text = "Select an adjacent empty hex to summon."
@@ -599,9 +616,8 @@ func _handle_hex_click(hex: Vector2i) -> void:
 					_update_unit_visual_states()
 				else:
 					_submit_action("ability", {"unit_id": _selected_unit.id})
-					_selected_unit = null
 					_action_mode = ""
-					_update_unit_visual_states()
+					_deselect_unit()
 			elif _selected_unit != null and _selected_unit.ability_requires_enemy_target():
 				if clicked_unit and clicked_unit.owner_id != pid:
 					if not _selected_unit.can_attack(
@@ -614,49 +630,230 @@ func _handle_hex_click(hex: Vector2i) -> void:
 						"unit_id": _selected_unit.id,
 						"extra": {"target_id": clicked_unit.id},
 					})
-					_selected_unit = null
 					_action_mode = ""
-					_update_unit_visual_states()
+					_deselect_unit()
 			elif _selected_unit != null and _is_summoner(_selected_unit):
 				if HexCoords.distance(_selected_unit.hex_position, hex) == 1:
 					_submit_action("ability", {
 						"unit_id": _selected_unit.id,
 						"extra": {"summon_hex": hex},
 					})
-				_selected_unit = null
 				_action_mode = ""
-				_update_unit_visual_states()
+				_deselect_unit()
 		"tile":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
-				_selected_unit = clicked_unit
-				_update_unit_visual_states()
+				_select_unit(clicked_unit)
 			elif _selected_unit != null:
 				_submit_action("tile", {"unit_id": _selected_unit.id})
-				_selected_unit = null
 				_action_mode = ""
-				_update_unit_visual_states()
+				_deselect_unit()
 
 
 func _on_end_turn() -> void:
 	_submit_action("end_turn", {})
 
 
-func _format_unit(unit: UnitBase) -> String:
-	var tags: String = ""
+# --- Unit inspection panel: stats text + contextual quick-action buttons ---
+func _setup_unit_action_panel() -> void:
+	_unit_actions_box = VBoxContainer.new()
+	_unit_actions_box.add_theme_constant_override("separation", 4)
+	var sidebar: Node = unit_info.get_parent()
+	sidebar.add_child(_unit_actions_box)
+	sidebar.move_child(_unit_actions_box, unit_info.get_index())
+
+
+func _select_unit(unit: UnitBase) -> void:
+	_selected_unit = unit
+	_update_unit_info_panel()
+	_update_unit_visual_states()
+
+
+func _deselect_unit() -> void:
+	_selected_unit = null
+	unit_info.text = "Click a unit to view details and available actions."
+	_clear_unit_action_buttons()
+	_update_unit_visual_states()
+
+
+func _update_unit_info_panel() -> void:
+	_clear_unit_action_buttons()
+	if _selected_unit == null or not _selected_unit.is_alive:
+		return
+	unit_info.text = _build_unit_info_text(_selected_unit)
+	_rebuild_unit_action_buttons(_selected_unit)
+
+
+func _build_unit_info_text(unit: UnitBase) -> String:
+	var lines: PackedStringArray = PackedStringArray()
+	var team: TeamDefinition = TeamRegistry.get_team(unit.team_id)
+	var owner_label: String = "Player %d" % (unit.owner_id + 1)
+	if GameState.is_solo():
+		owner_label = "You" if unit.owner_id == 0 else "AI"
+
+	lines.append("%s" % unit.display_name)
+	var tags: PackedStringArray = PackedStringArray()
 	if unit.is_leader:
-		tags += " [Leader]"
+		tags.append("Leader")
 	if unit.is_minion:
-		tags += " [Minion]"
+		tags.append("Minion")
 	if unit.is_ai_controlled:
-		tags += " [AI]"
-	return "%s%s\nHP: %d/%d  Move: %d  Range: %d\nAbility (%d RP): %s" % [
-		unit.display_name, tags,
-		unit.health, unit.max_health,
-		unit.move_range, unit.attack_range,
-		unit.ability_cost, unit.get_ability_description(),
-	]
+		tags.append("AI-controlled")
+	if not tags.is_empty():
+		lines.append("[%s]" % ", ".join(tags))
+
+	lines.append("Team: %s (%s)" % [team.team_name, owner_label])
+	lines.append("HP: %d / %d" % [unit.health, unit.max_health])
+	lines.append("Move: %d  |  Range: %d  |  Attack die: d%d" % [
+		unit.move_range, unit.attack_range, unit.attack_die_sides,
+	])
+	lines.append("Ability (%d RP): %s" % [unit.ability_cost, unit.get_ability_description()])
+
+	if unit.damage_bonus > 0:
+		lines.append("Buff: +%d attack damage this turn" % unit.damage_bonus)
+	if unit.defense_bonus > 0:
+		lines.append("Buff: +%d defense this turn" % unit.defense_bonus)
+
+	var tile: TileBase = match_ctrl.grid.get_tile(unit.hex_position)
+	if tile != null:
+		if tile.revealed:
+			lines.append("Tile: %s — %s" % [tile.display_name, tile.get_effect_description()])
+		else:
+			lines.append("Tile: Unknown (unrevealed)")
+
+	var pid: int = _get_active_player_id()
+	if unit.owner_id != pid:
+		lines.append("")
+		lines.append(_build_enemy_interaction_summary(unit, pid))
+	elif not unit.is_player_controllable():
+		lines.append("")
+		lines.append("This unit acts automatically at end of turn.")
+	elif not _can_local_player_act():
+		lines.append("")
+		lines.append("Not your turn — viewing only.")
+	else:
+		lines.append("")
+		lines.append("Available this turn:")
+
+	return "\n".join(lines)
 
 
+func _build_enemy_interaction_summary(enemy: UnitBase, pid: int) -> String:
+	var attackers: PackedStringArray = PackedStringArray()
+	for unit in match_ctrl.get_units_for_player(pid):
+		if not unit.is_player_controllable():
+			continue
+		if unit.can_attack(enemy, func(a, b): return match_ctrl.has_line_of_sight(a, b)):
+			attackers.append(unit.display_name)
+	if attackers.is_empty():
+		return "No friendly units can attack this target right now."
+	return "Can be attacked by: %s" % ", ".join(attackers)
+
+
+func _rebuild_unit_action_buttons(unit: UnitBase) -> void:
+	var pid: int = _get_active_player_id()
+	if unit.owner_id != pid or not unit.is_player_controllable() or not _can_local_player_act():
+		return
+
+	var los_check := func(a, b): return match_ctrl.has_line_of_sight(a, b)
+	var rp: int = match_ctrl.resource_points[pid]
+	var can_spend: bool = match_ctrl.turn_manager.can_spend_action()
+
+	_add_unit_action_button(
+		"Move (1 AP, +1 RP)",
+		can_spend,
+		"Plan movement for this unit." if can_spend else "No actions remaining.",
+		func() -> void:
+			_set_mode("move")
+			_select_unit(unit),
+	)
+
+	var targets_in_range: int = _count_attack_targets(unit, los_check)
+	_add_unit_action_button(
+		"Attack (1 AP)" + (" — %d target(s)" % targets_in_range if targets_in_range > 0 else ""),
+		can_spend and targets_in_range > 0,
+		"Select an enemy in range to attack." if can_spend and targets_in_range > 0 else "No valid targets in range.",
+		func() -> void:
+			_set_mode("attack")
+			_select_unit(unit)
+			log_label.text = "Select an enemy for %s to attack." % unit.display_name,
+	)
+
+	var ability_check: Dictionary = _get_ability_action_status(unit, rp, can_spend)
+	_add_unit_action_button(
+		"Ability (1 AP + %d RP)" % unit.ability_cost,
+		ability_check.get("enabled", false),
+		ability_check.get("hint", ""),
+		func() -> void:
+			_begin_ability_with_unit(unit),
+	)
+
+	var tile: TileBase = match_ctrl.grid.get_tile(unit.hex_position)
+	var can_tile: bool = can_spend and tile != null and tile.can_interact(unit)
+	_add_unit_action_button(
+		"Tile Interact (1 AP)",
+		can_tile,
+		"Use the tile beneath this unit." if can_tile else "No interactable tile here.",
+		func() -> void:
+			_set_mode("tile")
+			_select_unit(unit)
+			log_label.text = "Confirm tile interaction for %s." % unit.display_name,
+	)
+
+
+func _get_ability_action_status(unit: UnitBase, rp: int, can_spend: bool) -> Dictionary:
+	if not can_spend:
+		return {"enabled": false, "hint": "No actions remaining."}
+	if rp < unit.ability_cost:
+		return {"enabled": false, "hint": "Need %d RP (have %d)." % [unit.ability_cost, rp]}
+	if unit.ability_requires_enemy_target():
+		return {"enabled": true, "hint": "Select an enemy for Double Strike."}
+	if _is_summoner(unit):
+		return {"enabled": true, "hint": "Select an adjacent empty hex to summon."}
+	return {"enabled": true, "hint": unit.get_ability_description()}
+
+
+func _begin_ability_with_unit(unit: UnitBase) -> void:
+	_set_mode("ability")
+	_select_unit(unit)
+	if _is_summoner(unit):
+		log_label.text = "Select an adjacent empty hex to summon."
+	elif unit.ability_requires_enemy_target():
+		log_label.text = "Select an enemy to strike with Double Strike."
+	else:
+		_submit_action("ability", {"unit_id": unit.id})
+		_action_mode = ""
+		_deselect_unit()
+
+
+func _count_attack_targets(unit: UnitBase, los_check: Callable) -> int:
+	var count: int = 0
+	for enemy in match_ctrl.get_enemies_of(unit.owner_id):
+		if unit.can_attack(enemy, los_check):
+			count += 1
+	return count
+
+
+func _add_unit_action_button(text: String, enabled: bool, hint: String, callback: Callable) -> void:
+	var btn := Button.new()
+	btn.text = text
+	btn.disabled = not enabled
+	btn.tooltip_text = hint
+	btn.pressed.connect(callback)
+	_unit_actions_box.add_child(btn)
+
+
+func _clear_unit_action_buttons() -> void:
+	if _unit_actions_box == null:
+		return
+	for child in _unit_actions_box.get_children():
+		child.queue_free()
+
+
+func _format_unit(unit: UnitBase) -> String:
+	return _build_unit_info_text(unit)
+
+
+# --- Mouse position -> axial hex (inverse of HexCoords.axial_to_pixel) ---
 func _pixel_to_hex(pixel: Vector2) -> Vector2i:
 	var board_pos: Vector2 = pixel - board_root.position
 	# Rough inverse of axial_to_pixel
@@ -669,6 +866,7 @@ func _append_log(msg: String) -> void:
 	log_label.text = msg
 
 
+# --- Tile hover tooltip (name + effect for revealed/hidden tiles) ---
 func _setup_tile_tooltip() -> void:
 	_tile_tooltip = PanelContainer.new()
 	_tile_tooltip.visible = false
@@ -709,6 +907,7 @@ func _position_tile_tooltip() -> void:
 	_tile_tooltip.position = pos
 
 
+# --- Move path preview: confirmed paths (cyan) + hover preview (gold) ---
 func _clear_move_paths() -> void:
 	if _path_overlay == null:
 		return
@@ -796,6 +995,7 @@ func _get_unit_node(unit_id: String) -> Node2D:
 	return _unit_nodes[unit_id]
 
 
+# --- Combat visuals: listen to MatchController.combat_event, play VFX ---
 func _on_combat_event(event_type: String, data: Dictionary) -> void:
 	match event_type:
 		"attack":
@@ -846,6 +1046,7 @@ func _find_losing_leader_position(loser_id: int) -> Vector2:
 	return Vector2.INF
 
 
+# --- Victory/defeat overlay then transition to end_game scene ---
 func _on_match_over(winner_id: int) -> void:
 	_match_ending = true
 	GameState.last_winner_id = winner_id

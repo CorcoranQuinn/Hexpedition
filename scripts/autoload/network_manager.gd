@@ -15,6 +15,8 @@ const DEFAULT_PORT: int = 7777
 var peer: ENetMultiplayerPeer = null
 
 
+# --- ENet lifecycle: host, join, disconnect ---
+
 func _ready() -> void:
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -64,6 +66,8 @@ func get_display_name(player_id: int) -> String:
 	return "Client"
 
 
+# --- RPC: team pick sync and match start (host picks seed) ---
+
 @rpc("any_peer", "call_local", "reliable")
 func rpc_submit_team_selection(player_id: int, team_id: int) -> void:
 	if not _is_authority_for_selection(player_id):
@@ -81,6 +85,8 @@ func rpc_start_match(seed_value: int) -> void:
 	match_start_requested.emit()
 
 
+# --- RPC: client submits action; host validates and broadcasts result ---
+
 @rpc("any_peer", "call_local", "reliable")
 func rpc_submit_action(action_type: String, payload: Dictionary) -> void:
 	if not multiplayer.is_server():
@@ -93,6 +99,8 @@ func rpc_apply_action_result(action_type: String, payload: Dictionary, result: D
 	action_applied.emit(action_type, payload, result)
 
 
+# --- RPC: rematch flow ---
+
 @rpc("any_peer", "call_local", "reliable")
 func rpc_request_rematch(same_teams: bool) -> void:
 	if not multiplayer.is_server():
@@ -104,6 +112,8 @@ func rpc_request_rematch(same_teams: bool) -> void:
 func rpc_notify_rematch(same_teams: bool) -> void:
 	rematch_requested.emit(same_teams)
 
+
+# --- Local wrappers: route to RPC or emit directly for offline play ---
 
 func submit_action(action_type: String, payload: Dictionary) -> void:
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
@@ -142,6 +152,8 @@ func request_rematch(same_teams: bool) -> void:
 	else:
 		rpc_request_rematch.rpc_id(1, same_teams)
 
+
+# --- Internal peer cleanup and connection callbacks ---
 
 func _cleanup_peer() -> void:
 	if peer:

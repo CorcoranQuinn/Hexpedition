@@ -16,6 +16,8 @@ var actions_remaining: int = ACTIONS_PER_TURN
 var turn_number: int = 1
 
 
+# --- Match start and per-turn action budget (3 AP per player per turn) ---
+
 func start_match(starting_player: int = 0) -> void:
 	current_player = starting_player
 	turn_number = 1
@@ -23,6 +25,8 @@ func start_match(starting_player: int = 0) -> void:
 	turn_started.emit(current_player)
 	actions_changed.emit(actions_remaining)
 
+
+# --- Action spending and alternating player turns ---
 
 func can_spend_action() -> bool:
 	return actions_remaining > 0

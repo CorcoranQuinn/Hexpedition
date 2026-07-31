@@ -11,10 +11,13 @@ const MATCH_END_TIME: float = 2.4
 var _hex_size: float = 36.0
 
 
+# --- Public VFX entry points (called from game_board on combat_event) ---
+
 func setup(hex_size: float) -> void:
 	_hex_size = hex_size
 
 
+## Slash line, impact sparks, damage number, and target flash on basic/minion attack.
 func play_attack(from_pos: Vector2, to_pos: Vector2, damage: int, target_container: Node2D) -> void:
 	var slash := Line2D.new()
 	slash.width = 5.0
@@ -39,6 +42,7 @@ func play_attack(from_pos: Vector2, to_pos: Vector2, damage: int, target_contain
 			flash.tween_property(body, "modulate", Color(1.0, 1.0, 1.0), HIT_FLASH_TIME * 0.65)
 
 
+## Team-specific ability visuals; Double Strike reuses play_attack when it has a target.
 func play_ability(
 	center: Vector2,
 	ability_type: String,
@@ -76,6 +80,7 @@ func play_ability(
 			_play_buff_ring(center, Color(0.85, 0.85, 1.0))
 
 
+## Shrink/spin/fade unit visual; callback runs before queue_free (match win timing).
 func play_defeat(unit_container: Node2D, on_complete: Callable = Callable()) -> void:
 	if unit_container == null or not is_instance_valid(unit_container):
 		if on_complete.is_valid():
@@ -102,6 +107,7 @@ func play_defeat(unit_container: Node2D, on_complete: Callable = Callable()) -> 
 	)
 
 
+## Full-screen overlay when a leader dies; delays before game_board loads end scene.
 func play_match_end(
 	parent_ui: Control,
 	board_root: Node2D,
@@ -168,6 +174,8 @@ func play_match_end(
 		overlay.queue_free()
 
 
+# --- Ability-specific effect helpers ---
+
 func _play_heal_wave(center: Vector2, get_unit_world_pos: Callable, extra: Dictionary) -> void:
 	_play_buff_ring(center, Color(0.35, 0.95, 0.45))
 	for ally_id in extra.get("healed_unit_ids", []):
@@ -206,6 +214,8 @@ func _play_summon_burst(pos: Vector2) -> void:
 	_spawn_impact_burst(pos, Color(0.85, 0.5, 1.0), 12)
 	_spawn_damage_number(pos + Vector2(0, -12), "SUMMON", Color(0.85, 0.55, 1.0))
 
+
+# --- Reusable particle/text primitives (no external assets) ---
 
 func _spawn_impact_burst(pos: Vector2, color: Color, count: int = 6) -> void:
 	for i in count:

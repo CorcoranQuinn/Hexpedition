@@ -5,6 +5,8 @@ extends RefCounted
 var tiles: Dictionary = {}  # Vector2i -> TileBase
 
 
+# --- Tile storage and lookup ---
+
 func set_tile(hex: Vector2i, tile: TileBase) -> void:
 	tile.hex_position = hex
 	tiles[hex] = tile
@@ -17,6 +19,8 @@ func get_tile(hex: Vector2i) -> TileBase:
 func has_tile(hex: Vector2i) -> bool:
 	return tiles.has(hex)
 
+
+# --- Reveal fog and notify tile when a unit steps on it ---
 
 func reveal_tile(hex: Vector2i) -> TileBase:
 	var tile: TileBase = get_tile(hex)
@@ -36,6 +40,8 @@ func on_unit_entered(hex: Vector2i, unit: UnitBase) -> void:
 		reveal_tile(hex)
 	tile.on_unit_enter(unit)
 
+
+# --- Board iteration and procedural fill helper ---
 
 func get_all_hexes() -> Array:
 	return tiles.keys()

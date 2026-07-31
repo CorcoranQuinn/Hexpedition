@@ -14,6 +14,8 @@ static var _factories: Dictionary = {
 }
 
 
+# --- Factory: instantiate tile by type id at a hex (team_id for unique tiles) ---
+
 static func create(type_id: String, hex: Vector2i, team_id: int = -1) -> TileBase:
 	if not _factories.has(type_id):
 		push_warning("Unknown tile type: %s" % type_id)

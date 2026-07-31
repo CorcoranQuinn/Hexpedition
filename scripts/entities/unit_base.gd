@@ -23,10 +23,12 @@ var is_ai_controlled: bool = false
 var is_minion: bool = false
 var summoner_id: String = ""
 
-# Runtime buffs from abilities
+# --- Runtime buffs applied by abilities for the current turn ---
 var damage_bonus: int = 0
 var defense_bonus: int = 0
 
+
+# --- Construction ---
 
 func _init() -> void:
 	health = max_health
@@ -35,6 +37,8 @@ func _init() -> void:
 func get_unit_type_id() -> String:
 	return "unit_base"
 
+
+# --- Basic combat (attack roll, range, line of sight) ---
 
 func roll_basic_attack_damage() -> int:
 	return randi_range(1, attack_die_sides) + damage_bonus
@@ -61,6 +65,8 @@ func can_attack(target: UnitBase, line_of_sight_check: Callable = Callable()) ->
 	return true
 
 
+# --- Health and turn-scoped modifiers ---
+
 func take_damage(amount: int) -> void:
 	if not is_alive:
 		return
@@ -75,6 +81,8 @@ func heal(amount: int) -> void:
 		return
 	health = mini(max_health, health + amount)
 
+
+# --- Abilities (subclasses override use_ability and descriptions) ---
 
 func can_use_ability(resource_points: int, actions_available: bool = true) -> bool:
 	return is_alive and actions_available and resource_points >= ability_cost
@@ -97,6 +105,8 @@ func ability_requires_enemy_target() -> bool:
 	return false
 
 
+# --- Turn reset and controllability (human vs AI minion) ---
+
 func reset_turn_modifiers() -> void:
 	damage_bonus = 0
 	defense_bonus = 0
@@ -105,6 +115,8 @@ func reset_turn_modifiers() -> void:
 func is_player_controllable() -> bool:
 	return is_alive and not is_ai_controlled
 
+
+# --- Network/sync snapshot ---
 
 func to_snapshot() -> Dictionary:
 	return {

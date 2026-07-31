@@ -17,6 +17,8 @@ var pending_rematch_new_select: bool = false
 var match_seed: int = -1
 
 
+# --- Reset between menus / rematches ---
+
 func reset_match_state() -> void:
 	selected_team_ids = [-1, -1]
 	last_winner_id = -1
@@ -24,6 +26,8 @@ func reset_match_state() -> void:
 	pending_rematch_new_select = false
 	match_config_changed.emit()
 
+
+# --- Team selection and match-mode helpers ---
 
 func set_team_selection(player_id: int, team_id: int) -> void:
 	if player_id >= 0 and player_id < selected_team_ids.size():

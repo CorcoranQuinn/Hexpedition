@@ -8,6 +8,8 @@ const DIRECTIONS: Array[Vector2i] = [
 ]
 
 
+# --- Distance, neighbors, and area queries ---
+
 static func distance(a: Vector2i, b: Vector2i) -> int:
 	var dq: int = abs(a.x - b.x)
 	var dr: int = abs(a.y - b.y)
@@ -42,11 +44,15 @@ static func within_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 	return results
 
 
+# --- Rendering: axial hex coords to screen pixels (flat-top layout) ---
+
 static func axial_to_pixel(hex: Vector2i, size: float) -> Vector2:
 	var x: float = size * (sqrt(3.0) * hex.x + sqrt(3.0) / 2.0 * hex.y)
 	var y: float = size * (3.0 / 2.0 * hex.y)
 	return Vector2(x, y)
 
+
+# --- Line of sight: interpolate between hexes and round to nearest axial cell ---
 
 static func line_of_sight_path(from_hex: Vector2i, to_hex: Vector2i) -> Array[Vector2i]:
 	var dist: int = distance(from_hex, to_hex)

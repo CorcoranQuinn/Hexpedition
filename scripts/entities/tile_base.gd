@@ -10,6 +10,8 @@ var is_team_unique: bool = false
 var team_id: int = -1  # -1 = neutral
 
 
+# --- Identity and display (subclasses set colors and labels) ---
+
 func get_tile_type_id() -> String:
 	return "tile_base"
 
@@ -22,6 +24,8 @@ func get_revealed_color() -> Color:
 	return Color(0.35, 0.38, 0.42)
 
 
+# --- Lifecycle hooks when revealed or when a unit enters ---
+
 ## Called once when a unit first steps on this tile (triggers reveal).
 func on_unit_enter(_unit: UnitBase) -> void:
 	pass
@@ -31,6 +35,8 @@ func on_unit_enter(_unit: UnitBase) -> void:
 func on_reveal() -> void:
 	pass
 
+
+# --- Player tile-interact action (unique team tiles override interact) ---
 
 ## Special tile interaction action (ActionType.TILE_INTERACT).
 ## Override for unique team tiles and interactive terrain.
@@ -48,6 +54,8 @@ func can_interact(unit: UnitBase) -> bool:
 		return unit.team_id == team_id
 	return false
 
+
+# --- Movement and combat blocking rules ---
 
 func movement_cost_modifier() -> int:
 	return 0

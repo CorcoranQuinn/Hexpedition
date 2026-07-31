@@ -28,6 +28,7 @@ var _pending_reveal: Dictionary = {}  # hex -> tile type id (hidden until walked
 var _pending_team_ids: Dictionary = {}  # hex -> team id for unique tiles
 
 
+# --- Match setup: procedural board, team spawn, turn 1 ---
 func setup_match(seed_value: int = -1) -> void:
 	if seed_value >= 0:
 		rng.seed = seed_value
@@ -46,6 +47,7 @@ func setup_match(seed_value: int = -1) -> void:
 	state_changed.emit()
 
 
+# --- Procedural generation: plain hidden tiles, mountains, team unique tiles ---
 func _generate_board() -> void:
 	var all_hexes: Array = HexCoords.within_radius(Vector2i.ZERO, BOARD_RADIUS)
 	var reserved: Dictionary = _get_reserved_hexes()
@@ -76,6 +78,7 @@ func _reveal_starting_terrain(type_id: String) -> void:
 		_reveal_hex_if_hidden(hex)
 
 
+# --- Keep spawn zones clear of random terrain features ---
 func _get_reserved_hexes() -> Dictionary:
 	var reserved: Dictionary = {}
 	for player_id in 2:
@@ -127,6 +130,7 @@ func _shuffle_array(arr: Array) -> void:
 		arr[j] = tmp
 
 
+# --- Place each player's leader + followers on fixed spawn hexes ---
 func _spawn_teams() -> void:
 	for player_id in 2:
 		var team_def: TeamDefinition = TeamRegistry.get_team(
@@ -150,6 +154,7 @@ func _get_spawn_hexes(player_id: int) -> Array[Vector2i]:
 	return [Vector2i(3, -1), Vector2i(3, -2), Vector2i(2, -1)]
 
 
+# --- Unit queries used by UI and AI ---
 func get_units_for_player(player_id: int) -> Array[UnitBase]:
 	var result: Array[UnitBase] = []
 	for u in units:
@@ -184,12 +189,9 @@ func can_act(player_id: int) -> bool:
 	return turn_manager.current_player == player_id and turn_manager.can_spend_action()
 
 
-# --- Actions ---
+# --- Player actions (each costs 1 action point unless noted) ---
 
-func can_move_unit_to(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> bool:
-	return _can_move_unit(unit, target, pending_moves)
-
-
+## BFS path for UI previews; respects pending batch-move occupancy.
 func find_movement_path(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> Array[Vector2i]:
 	var start: Vector2i = unit.hex_position
 	if target == start:
@@ -229,6 +231,11 @@ func find_movement_path(unit: UnitBase, target: Vector2i, pending_moves: Diction
 	return path
 
 
+func can_move_unit_to(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> bool:
+	return _can_move_unit(unit, target, pending_moves)
+
+
+## Validate a batch move before spending AP (duplicate targets, range, occupancy).
 func can_apply_moves(player_id: int, moves: Dictionary) -> Dictionary:
 	for unit_id in moves:
 		var unit: UnitBase = _find_unit(unit_id)
@@ -251,6 +258,7 @@ func can_apply_moves(player_id: int, moves: Dictionary) -> Dictionary:
 	return {"success": true}
 
 
+## Move all listed units for one AP; reveal fog along each path; grant +1 RP.
 func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
 	## moves: { unit_id: Vector2i target_hex }
 	if not can_act(player_id):
@@ -279,6 +287,7 @@ func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
 	return {"success": true}
 
 
+## Basic attack for 1 AP; emits combat_event for UI VFX.
 func perform_attack(player_id: int, attacker_id: String, target_id: String) -> Dictionary:
 	if not can_act(player_id):
 		return _fail("Not your turn or no actions left.")
@@ -313,6 +322,7 @@ func perform_attack(player_id: int, attacker_id: String, target_id: String) -> D
 	return {"success": true, "damage": damage}
 
 
+## Special ability for 1 AP + RP cost; context dict supplies allies, enemies, grid, targets.
 func perform_ability(player_id: int, unit_id: String, extra: Dictionary = {}) -> Dictionary:
 	if not can_act(player_id):
 		return _fail("Not your turn or no actions left.")
@@ -369,12 +379,14 @@ func perform_ability(player_id: int, unit_id: String, extra: Dictionary = {}) ->
 	return result
 
 
+## Resolve optional enemy target passed from UI (target_id string or UnitBase).
 func _resolve_ability_target(extra: Dictionary) -> UnitBase:
 	if extra.has("target_id"):
 		return _find_unit(str(extra.get("target_id", "")))
 	return extra.get("target", null)
 
 
+## Stand on a unique tile and spend 1 AP for its interact effect (forge, hive, etc.).
 func perform_tile_interact(player_id: int, unit_id: String) -> Dictionary:
 	if not can_act(player_id):
 		return _fail("Not your turn or no actions left.")
@@ -406,6 +418,8 @@ func perform_tile_interact(player_id: int, unit_id: String) -> Dictionary:
 	state_changed.emit()
 	return result
 
+
+# --- Minion summoning (Swarm teams; capped per player) ---
 
 func can_summon_at(player_id: int, hex: Vector2i) -> bool:
 	if not grid.has_tile(hex):
@@ -442,6 +456,8 @@ func summon_minion(player_id: int, summoner: UnitBase, hex: Vector2i, type_id: S
 	return minion
 
 
+# --- Turn end: AI minions act, then pass to next player ---
+
 func run_minion_phase(player_id: int) -> void:
 	MatchAI.run_minions(self, player_id)
 
@@ -456,6 +472,7 @@ func end_turn_with_minions(player_id: int) -> void:
 	state_changed.emit()
 
 
+## Spend one action point; auto-run minions and end turn when AP hits zero.
 func _spend_action_point(player_id: int) -> Dictionary:
 	if not turn_manager.can_spend_action():
 		return _fail("No actions left.")
@@ -470,6 +487,8 @@ func _after_action_spent(player_id: int) -> void:
 		turn_manager.end_turn()
 		state_changed.emit()
 
+
+# --- Movement validation (range BFS, occupancy, vacating units in batch moves) ---
 
 func _can_move_unit(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> bool:
 	if target == unit.hex_position:
@@ -545,6 +564,8 @@ func _movement_distance(from_hex: Vector2i, to_hex: Vector2i, pending_moves: Dic
 	return -1
 
 
+# --- Fog of war reveal and line-of-sight checks ---
+
 func reveal_hex(hex: Vector2i) -> void:
 	if not grid.has_tile(hex):
 		return
@@ -577,6 +598,8 @@ func _peek_tile_at(hex: Vector2i) -> TileBase:
 	return grid.get_tile(hex)
 
 
+# --- Resource economy and internal helpers ---
+
 func _add_resource(player_id: int, amount: int) -> void:
 	var cap: int = get_max_resource(player_id)
 	resource_points[player_id] = mini(cap, resource_points[player_id] + amount)
@@ -589,6 +612,7 @@ func _find_unit(unit_id: String) -> UnitBase:
 	return null
 
 
+## Minion attacks during end-of-turn phase (no AP cost; still emits combat_event).
 func perform_minion_attack(minion: UnitBase, target: UnitBase) -> Dictionary:
 	if minion == null or target == null:
 		return _fail("Unit not found.")
@@ -611,6 +635,7 @@ func _emit_combat_event(event_type: String, data: Dictionary) -> void:
 	combat_event.emit(event_type, data)
 
 
+## Win when a player's leader is dead; emit match_over with surviving player.
 func _check_win() -> void:
 	for player_id in 2:
 		var leaders_alive: bool = false
@@ -624,6 +649,7 @@ func _check_win() -> void:
 			return
 
 
+## Swap a hidden placeholder tile for its real type when a unit walks onto it.
 func _reveal_hex_if_hidden(hex: Vector2i) -> void:
 	if not _pending_reveal.has(hex):
 		return
