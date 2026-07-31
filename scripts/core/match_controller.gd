@@ -41,7 +41,6 @@ func setup_match(seed_value: int = -1) -> void:
 
 	_generate_board()
 	_spawn_teams()
-	turn_manager = TurnManager.new()
 	turn_manager.start_match(0)
 	state_changed.emit()
 

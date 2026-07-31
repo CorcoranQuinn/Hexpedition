@@ -21,6 +21,7 @@ var _move_targets: Dictionary = {}
 var _tile_nodes: Dictionary = {}
 var _unit_nodes: Dictionary = {}
 var _ai_running: bool = false
+var _hovered_unit_id: String = ""
 
 
 func _ready() -> void:
@@ -33,8 +34,6 @@ func _ready() -> void:
 	match_ctrl.state_changed.connect(_refresh_ui)
 	match_ctrl.action_log.connect(_append_log)
 	match_ctrl.match_over.connect(_on_match_over)
-	match_ctrl.turn_manager.player_changed.connect(func(_p): _selected_unit = null; _action_mode = "")
-	match_ctrl.turn_manager.turn_started.connect(_on_turn_started)
 	NetworkManager.action_applied.connect(_on_network_action)
 
 	if GameState.pending_rematch_same_teams:
@@ -45,8 +44,23 @@ func _ready() -> void:
 
 	var seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
 	match_ctrl.setup_match(seed)
+	_connect_turn_signals()
 	_build_board_visuals()
 	_refresh_ui()
+	set_process(true)
+
+
+func _connect_turn_signals() -> void:
+	if not match_ctrl.turn_manager.turn_started.is_connected(_on_turn_started):
+		match_ctrl.turn_manager.turn_started.connect(_on_turn_started)
+	if not match_ctrl.turn_manager.player_changed.is_connected(_on_player_changed):
+		match_ctrl.turn_manager.player_changed.connect(_on_player_changed)
+
+
+func _on_player_changed(_player_id: int) -> void:
+	_selected_unit = null
+	_action_mode = ""
+	_update_unit_visual_states()
 
 
 func _build_board_visuals() -> void:
@@ -87,23 +101,69 @@ func _make_hex_polygon(tile: TileBase) -> Polygon2D:
 func _spawn_unit_visual(unit: UnitBase) -> void:
 	if _unit_nodes.has(unit.id):
 		return
-	var marker := Polygon2D.new()
-	var pts: PackedVector2Array = PackedVector2Array([
-		Vector2(0, -14), Vector2(12, 10), Vector2(-12, 10)
-	])
-	marker.polygon = pts
+
+	var container := Node2D.new()
+	container.set_meta("unit_id", unit.id)
+
+	var highlight := Polygon2D.new()
+	highlight.name = "Highlight"
+	highlight.polygon = _make_unit_points(17)
+	highlight.color = Color(1.0, 1.0, 1.0, 0.22)
+	highlight.visible = false
+	container.add_child(highlight)
+
+	var outline := Line2D.new()
+	outline.name = "Outline"
+	outline.points = _make_unit_line_points(15)
+	outline.default_color = Color(1.0, 0.92, 0.35, 0.95)
+	outline.width = 3.0
+	outline.closed = true
+	outline.visible = false
+	container.add_child(outline)
+
+	var body := Polygon2D.new()
+	body.name = "Body"
+	body.polygon = _make_unit_points(14)
 	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[unit.owner_id])
-	marker.color = team.team_color
+	body.color = team.team_color
 	if unit.is_minion:
-		marker.scale = Vector2(0.65, 0.65)
-		marker.modulate = Color(0.85, 0.85, 0.85)
+		body.scale = Vector2(0.65, 0.65)
+		highlight.scale = Vector2(0.65, 0.65)
+		outline.scale = Vector2(0.65, 0.65)
 	elif unit.is_leader:
-		marker.scale = Vector2(1.3, 1.3)
+		body.scale = Vector2(1.3, 1.3)
+		highlight.scale = Vector2(1.3, 1.3)
+		outline.scale = Vector2(1.3, 1.3)
 	if unit.is_ai_controlled:
-		marker.modulate = marker.modulate * Color(0.9, 0.95, 0.9)
-	marker.position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
-	board_root.add_child(marker)
-	_unit_nodes[unit.id] = marker
+		body.modulate = Color(0.9, 0.95, 0.9)
+	container.add_child(body)
+
+	container.position = HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
+	board_root.add_child(container)
+	_unit_nodes[unit.id] = container
+
+
+func _make_unit_points(size: float) -> PackedVector2Array:
+	return PackedVector2Array([
+		Vector2(0, -size), Vector2(size * 0.86, size * 0.72), Vector2(-size * 0.86, size * 0.72)
+	])
+
+
+func _make_unit_line_points(size: float) -> PackedVector2Array:
+	return PackedVector2Array([
+		Vector2(0, -size), Vector2(size * 0.86, size * 0.72), Vector2(-size * 0.86, size * 0.72), Vector2(0, -size)
+	])
+
+
+func _update_unit_visual_states() -> void:
+	for unit_id in _unit_nodes:
+		var container: Node2D = _unit_nodes[unit_id]
+		var highlight: Polygon2D = container.get_node("Highlight") as Polygon2D
+		var outline: Line2D = container.get_node("Outline") as Line2D
+		if highlight:
+			highlight.visible = unit_id == _hovered_unit_id
+		if outline:
+			outline.visible = _selected_unit != null and _selected_unit.id == unit_id
 
 
 func _refresh_ui() -> void:
@@ -122,6 +182,7 @@ func _refresh_ui() -> void:
 	]
 	_update_board_colors()
 	_update_unit_positions()
+	_update_unit_visual_states()
 	_update_action_buttons()
 
 
@@ -189,6 +250,10 @@ func _run_ai_turn_async() -> void:
 	if GameState.is_solo() and match_ctrl.turn_manager.current_player == GameState.get_ai_player_id():
 		MatchAI.run_turn(match_ctrl, GameState.get_ai_player_id())
 		_refresh_ui()
+		# Force end if the AI couldn't spend all remaining actions.
+		if GameState.is_solo() and match_ctrl.turn_manager.current_player == GameState.get_ai_player_id():
+			match_ctrl.end_turn_with_minions(GameState.get_ai_player_id())
+			_refresh_ui()
 	_ai_running = false
 	_update_action_buttons()
 
@@ -202,7 +267,22 @@ func _set_mode(mode: String) -> void:
 	_action_mode = mode
 	_move_targets.clear()
 	_selected_unit = null
+	_update_unit_visual_states()
 	log_label.text = "Mode: %s — select a unit." % mode.capitalize()
+
+
+func _process(_delta: float) -> void:
+	if _ai_running:
+		return
+	var hex: Vector2i = _pixel_to_hex(get_local_mouse_position())
+	var hovered_id: String = ""
+	if match_ctrl.grid.has_tile(hex):
+		var unit: UnitBase = match_ctrl.get_unit_at(hex)
+		if unit != null and unit.is_alive:
+			hovered_id = unit.id
+	if hovered_id != _hovered_unit_id:
+		_hovered_unit_id = hovered_id
+		_update_unit_visual_states()
 
 
 func _input(event: InputEvent) -> void:
@@ -268,18 +348,23 @@ func _handle_hex_click(hex: Vector2i) -> void:
 			if clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 				unit_info.text = _format_unit(clicked_unit)
+				_update_unit_visual_states()
 		"move":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 				unit_info.text = _format_unit(clicked_unit)
+				_update_unit_visual_states()
 			elif _selected_unit != null:
 				_move_targets[_selected_unit.id] = hex
 				_submit_action("move", {"moves": _move_targets.duplicate()})
 				_move_targets.clear()
 				_action_mode = ""
+				_selected_unit = null
+				_update_unit_visual_states()
 		"attack":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
+				_update_unit_visual_states()
 			elif _selected_unit != null and clicked_unit and clicked_unit.owner_id != pid:
 				_submit_action("attack", {
 					"attacker_id": _selected_unit.id,
@@ -287,15 +372,18 @@ func _handle_hex_click(hex: Vector2i) -> void:
 				})
 				_selected_unit = null
 				_action_mode = ""
+				_update_unit_visual_states()
 		"ability":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
 				if _is_summoner(_selected_unit):
 					log_label.text = "Select an adjacent empty hex to summon."
+					_update_unit_visual_states()
 				else:
 					_submit_action("ability", {"unit_id": _selected_unit.id})
 					_selected_unit = null
 					_action_mode = ""
+					_update_unit_visual_states()
 			elif _selected_unit != null and _is_summoner(_selected_unit):
 				if HexCoords.distance(_selected_unit.hex_position, hex) == 1:
 					_submit_action("ability", {
@@ -304,13 +392,16 @@ func _handle_hex_click(hex: Vector2i) -> void:
 					})
 				_selected_unit = null
 				_action_mode = ""
+				_update_unit_visual_states()
 		"tile":
 			if _selected_unit == null and clicked_unit and clicked_unit.owner_id == pid and clicked_unit.is_player_controllable():
 				_selected_unit = clicked_unit
+				_update_unit_visual_states()
 			elif _selected_unit != null:
 				_submit_action("tile", {"unit_id": _selected_unit.id})
 				_selected_unit = null
 				_action_mode = ""
+				_update_unit_visual_states()
 
 
 func _on_end_turn() -> void:
