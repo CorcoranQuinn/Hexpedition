@@ -14,7 +14,7 @@ extends Control
 
 const HEX_SIZE: float = 36.0
 
-var match: MatchController = MatchController.new()
+var match_ctrl: MatchController = MatchController.new()
 var _selected_unit: UnitBase = null
 var _action_mode: String = ""
 var _move_targets: Dictionary = {}
@@ -30,11 +30,11 @@ func _ready() -> void:
 	tile_button.pressed.connect(_set_mode.bind("tile"))
 	end_turn_button.pressed.connect(_on_end_turn)
 
-	match.state_changed.connect(_refresh_ui)
-	match.action_log.connect(_append_log)
-	match.match_over.connect(_on_match_over)
-	match.turn_manager.player_changed.connect(func(_p): _selected_unit = null; _action_mode = "")
-	match.turn_manager.turn_started.connect(_on_turn_started)
+	match_ctrl.state_changed.connect(_refresh_ui)
+	match_ctrl.action_log.connect(_append_log)
+	match_ctrl.match_over.connect(_on_match_over)
+	match_ctrl.turn_manager.player_changed.connect(func(_p): _selected_unit = null; _action_mode = "")
+	match_ctrl.turn_manager.turn_started.connect(_on_turn_started)
 	NetworkManager.action_applied.connect(_on_network_action)
 
 	if GameState.pending_rematch_same_teams:
@@ -44,7 +44,7 @@ func _ready() -> void:
 		return
 
 	var seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
-	match.setup_match(seed)
+	match_ctrl.setup_match(seed)
 	_build_board_visuals()
 	_refresh_ui()
 
@@ -55,13 +55,13 @@ func _build_board_visuals() -> void:
 	_tile_nodes.clear()
 	_unit_nodes.clear()
 
-	for hex in match.grid.get_all_hexes():
-		var tile: TileBase = match.grid.get_tile(hex)
+	for hex in match_ctrl.grid.get_all_hexes():
+		var tile: TileBase = match_ctrl.grid.get_tile(hex)
 		var poly := _make_hex_polygon(tile)
 		board_root.add_child(poly)
 		_tile_nodes[hex] = poly
 
-	for unit in match.units:
+	for unit in match_ctrl.units:
 		_spawn_unit_visual(unit)
 
 
@@ -107,18 +107,18 @@ func _spawn_unit_visual(unit: UnitBase) -> void:
 
 
 func _refresh_ui() -> void:
-	var pid: int = match.turn_manager.current_player
+	var pid: int = match_ctrl.turn_manager.current_player
 	if GameState.is_solo():
 		var who: String = "Your Turn" if pid == 0 else "AI Turn"
-		turn_label.text = "Turn %d — %s" % [match.turn_manager.turn_number, who]
+		turn_label.text = "Turn %d — %s" % [match_ctrl.turn_manager.turn_number, who]
 	else:
-		turn_label.text = "Turn %d — Player %d" % [match.turn_manager.turn_number, pid + 1]
+		turn_label.text = "Turn %d — Player %d" % [match_ctrl.turn_manager.turn_number, pid + 1]
 	actions_label.text = "Actions: %d / %d" % [
-		match.turn_manager.actions_remaining, TurnManager.ACTIONS_PER_TURN
+		match_ctrl.turn_manager.actions_remaining, TurnManager.ACTIONS_PER_TURN
 	]
 	rp_label.text = "RP — P1: %d/%d  P2: %d/%d" % [
-		match.resource_points[0], match.get_max_resource(0),
-		match.resource_points[1], match.get_max_resource(1),
+		match_ctrl.resource_points[0], match_ctrl.get_max_resource(0),
+		match_ctrl.resource_points[1], match_ctrl.get_max_resource(1),
 	]
 	_update_board_colors()
 	_update_unit_positions()
@@ -127,7 +127,7 @@ func _refresh_ui() -> void:
 
 func _update_board_colors() -> void:
 	for hex in _tile_nodes:
-		var tile: TileBase = match.grid.get_tile(hex)
+		var tile: TileBase = match_ctrl.grid.get_tile(hex)
 		var poly: Polygon2D = _tile_nodes[hex]
 		poly.color = tile.get_revealed_color() if tile.revealed else Color(0.15, 0.16, 0.2)
 		var lbl: Label = poly.get_child(0) as Label
@@ -136,7 +136,7 @@ func _update_board_colors() -> void:
 
 
 func _update_unit_positions() -> void:
-	for unit in match.units:
+	for unit in match_ctrl.units:
 		if not unit.is_alive:
 			if _unit_nodes.has(unit.id):
 				_unit_nodes[unit.id].queue_free()
@@ -159,11 +159,11 @@ func _update_action_buttons() -> void:
 
 func _can_local_player_act() -> bool:
 	if GameState.is_solo():
-		return match.turn_manager.current_player == 0 and match.turn_manager.can_spend_action() and not _ai_running
+		return match_ctrl.turn_manager.current_player == 0 and match_ctrl.turn_manager.can_spend_action() and not _ai_running
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
-		return match.turn_manager.can_spend_action()
+		return match_ctrl.turn_manager.can_spend_action()
 	var local_id: int = GameState.get_local_player_id()
-	return match.turn_manager.current_player == local_id and match.turn_manager.can_spend_action()
+	return match_ctrl.turn_manager.current_player == local_id and match_ctrl.turn_manager.can_spend_action()
 
 
 func _on_turn_started(player_id: int) -> void:
@@ -174,7 +174,7 @@ func _on_turn_started(player_id: int) -> void:
 
 func _get_active_player_id() -> int:
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
-		return match.turn_manager.current_player
+		return match_ctrl.turn_manager.current_player
 	if GameState.is_solo():
 		return 0
 	return GameState.get_local_player_id()
@@ -186,8 +186,8 @@ func _run_ai_turn_async() -> void:
 	_ai_running = true
 	_update_action_buttons()
 	await get_tree().create_timer(0.5).timeout
-	if GameState.is_solo() and match.turn_manager.current_player == GameState.get_ai_player_id():
-		MatchAI.run_turn(match, GameState.get_ai_player_id())
+	if GameState.is_solo() and match_ctrl.turn_manager.current_player == GameState.get_ai_player_id():
+		MatchAI.run_turn(match_ctrl, GameState.get_ai_player_id())
 		_refresh_ui()
 	_ai_running = false
 	_update_action_buttons()
@@ -208,7 +208,7 @@ func _set_mode(mode: String) -> void:
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var hex: Vector2i = _pixel_to_hex(get_local_mouse_position())
-		if not match.grid.has_tile(hex):
+		if not match_ctrl.grid.has_tile(hex):
 			return
 		_handle_hex_click(hex)
 
@@ -217,16 +217,16 @@ func _execute_action(action_type: String, payload: Dictionary) -> Dictionary:
 	var pid: int = payload.get("player_id", _get_active_player_id())
 	match action_type:
 		"move":
-			return match.perform_move(pid, payload.get("moves", {}))
+			return match_ctrl.perform_move(pid, payload.get("moves", {}))
 		"attack":
-			return match.perform_attack(pid, payload.get("attacker_id", ""), payload.get("target_id", ""))
+			return match_ctrl.perform_attack(pid, payload.get("attacker_id", ""), payload.get("target_id", ""))
 		"ability":
-			return match.perform_ability(pid, payload.get("unit_id", ""), payload.get("extra", {}))
+			return match_ctrl.perform_ability(pid, payload.get("unit_id", ""), payload.get("extra", {}))
 		"tile":
-			return match.perform_tile_interact(pid, payload.get("unit_id", ""))
+			return match_ctrl.perform_tile_interact(pid, payload.get("unit_id", ""))
 		"end_turn":
 			var pid: int = payload.get("player_id", _get_active_player_id())
-			match.end_turn_with_minions(pid)
+			match_ctrl.end_turn_with_minions(pid)
 			return {"success": true}
 	return {"success": false, "message": "Unknown action."}
 
@@ -259,10 +259,10 @@ func _handle_hex_click(hex: Vector2i) -> void:
 		return
 	if GameState.is_online() and not _can_local_player_act():
 		return
-	if GameState.is_solo() and match.turn_manager.current_player != 0:
+	if GameState.is_solo() and match_ctrl.turn_manager.current_player != 0:
 		return
 	var pid: int = _get_active_player_id()
-	var clicked_unit: UnitBase = match.get_unit_at(hex)
+	var clicked_unit: UnitBase = match_ctrl.get_unit_at(hex)
 
 	match _action_mode:
 		"":

@@ -77,25 +77,25 @@ func _refresh_team_details() -> void:
 func _refresh_player_status() -> void:
 	p1_status.text = _format_player_status(0)
 	p2_status.text = _format_player_status(1)
-	var ready: bool = GameState.all_teams_selected()
-	start_button.disabled = not ready
+	var teams_ready: bool = GameState.all_teams_selected()
+	start_button.disabled = not teams_ready
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
-		start_button.visible = ready
+		start_button.visible = teams_ready
 	elif GameState.is_solo():
 		start_button.visible = false
 	elif GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
-		start_button.visible = ready
+		start_button.visible = teams_ready
 	else:
 		start_button.visible = false
 
 
 func _format_player_status(player_id: int) -> String:
-	var name: String = NetworkManager.get_display_name(player_id)
+	var player_name: String = NetworkManager.get_display_name(player_id)
 	var tid: int = GameState.selected_team_ids[player_id]
 	if tid < 0:
-		return "%s: Not selected" % name
+		return "%s: Not selected" % player_name
 	var team: TeamDefinition = TeamRegistry.get_team(tid)
-	return "%s: %s" % [name, team.team_name]
+	return "%s: %s" % [player_name, team.team_name]
 
 
 func _on_random_pressed() -> void:
