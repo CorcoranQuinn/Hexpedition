@@ -18,6 +18,7 @@ extends Control
 # --- Constants & preloads ---
 const HEX_SIZE: float = 36.0
 const BattleEffectsScript = preload("res://scripts/ui/battle_effects.gd")
+const TileArtScript = preload("res://scripts/ui/tile_art.gd")
 
 # --- Isometric projection & camera ---
 ## The board is drawn on a squashed, rotatable ground plane while units stay
@@ -26,6 +27,14 @@ const ISO_SQUASH: float = 0.58  ## Vertical foreshortening of the ground plane.
 const CAMERA_ROTATION_STEP: float = PI / 3.0  ## 60 degrees — one hex face per press.
 const CAMERA_TWEEN_TIME: float = 0.3
 const UNIT_DEPTH_RANGE: int = 40  ## Largest z offset a unit may take from screen depth.
+
+# --- Tile presentation ---
+const TILE_BORDER_COLOR := Color(0.03, 0.03, 0.05, 0.9)
+const TILE_BORDER_WIDTH: float = 2.0
+
+# --- On-board unit popup ---
+const UNIT_POPUP_WIDTH: float = 226.0
+const UNIT_POPUP_GAP: float = 26.0  ## Horizontal clearance from the unit marker.
 
 # --- Leader health panel layout (kept clear of the right-hand sidebar) ---
 const SIDEBAR_WIDTH: float = 320.0
@@ -51,6 +60,9 @@ var _hovered_hex: Vector2i = Vector2i(999999, 999999)
 var _move_animating: bool = false
 var _suppress_position_snap: Dictionary = {}  ## During move tween, don't snap unit nodes.
 var _unit_actions_box: VBoxContainer  ## Quick-action buttons for the selected friendly unit.
+var _unit_popup: PanelContainer  ## Floating inspector anchored to the selected unit.
+var _unit_popup_title: Label
+var _unit_popup_info: Label
 
 # --- Camera state (see ISO_SQUASH notes above) ---
 var _ground_layer: Node2D  ## Applies the isometric squash in screen space.
@@ -76,6 +88,11 @@ const PATH_COLOR_PREVIEW := Color(1.0, 0.92, 0.45, 0.75)
 
 # --- Lifecycle: wire signals, start or resume match, build visuals ---
 func _ready() -> void:
+	# Let board clicks fall through to _unhandled_input; child Controls such as
+	# the sidebar and unit popup still capture their own input.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	unit_info.text = "Click a unit on the board to inspect it."
+
 	move_button.pressed.connect(_set_mode.bind("move"))
 	attack_button.pressed.connect(_set_mode.bind("attack"))
 	ability_button.pressed.connect(_set_mode.bind("ability"))
@@ -111,7 +128,7 @@ func _ready() -> void:
 	_battle_effects.z_index = 60
 	_actor_layer.add_child(_battle_effects)
 	_setup_tile_tooltip()
-	_setup_unit_action_panel()
+	_setup_unit_popup()
 	_setup_camera_controls()
 	_setup_leader_panels()
 	_cache_base_yaws()
@@ -199,18 +216,60 @@ func _make_hex_polygon(tile: TileBase) -> Polygon2D:
 	poly.color = tile.get_revealed_color() if tile.revealed else Color(0.15, 0.16, 0.2)
 	poly.set_meta("hex", tile.hex_position)
 
-	# The anchor cancels the ground plane's yaw and squash so glyphs stay upright.
+	# Dark rim so adjacent tiles read as separate cells.
+	var border := Line2D.new()
+	border.name = "Border"
+	border.points = points
+	border.closed = true
+	border.width = TILE_BORDER_WIDTH
+	border.default_color = TILE_BORDER_COLOR
+	border.antialiased = true
+	border.joint_mode = Line2D.LINE_JOINT_ROUND
+	poly.add_child(border)
+
+	# The anchor cancels the ground plane's yaw and squash so terrain markers
+	# and glyphs stay upright as the camera turns.
 	var anchor := Node2D.new()
-	anchor.name = "LabelAnchor"
+	anchor.name = "Upright"
 	poly.add_child(anchor)
 
 	var label := Label.new()
 	label.name = "TileLabel"
-	label.text = tile.get_hidden_label() if not tile.revealed else tile.display_name.substr(0, 1)
 	label.position = Vector2(-8, -10)
 	label.add_theme_font_size_override("font_size", 12)
 	anchor.add_child(label)
+
+	_refresh_tile_decor(poly, tile)
 	return poly
+
+
+## Terrain markers are rebuilt only when a tile's identity changes, which in
+## practice means the moment fog is lifted from it.
+func _refresh_tile_decor(poly: Polygon2D, tile: TileBase) -> void:
+	var type_id: String = tile.get_tile_type_id() if tile.revealed else "hidden"
+	if str(poly.get_meta("art_type", "")) == type_id:
+		return
+	poly.set_meta("art_type", type_id)
+
+	var anchor: Node2D = poly.get_node_or_null("Upright") as Node2D
+	if anchor == null:
+		return
+	var previous: Node = anchor.get_node_or_null("Decor")
+	if previous != null:
+		anchor.remove_child(previous)
+		previous.queue_free()
+
+	var team_color: Color = Color.WHITE
+	if tile.is_team_unique and tile.team_id >= 0:
+		team_color = TeamRegistry.get_team(tile.team_id).team_color
+	var decor: Node2D = TileArtScript.build(type_id, team_color)
+	anchor.add_child(decor)
+	anchor.move_child(decor, 0)
+
+	# Revealed terrain speaks for itself; only fogged hexes need the glyph.
+	var label: Label = anchor.get_node_or_null("TileLabel") as Label
+	if label != null:
+		label.text = tile.get_hidden_label() if not tile.revealed else ""
 
 
 func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
@@ -341,9 +400,7 @@ func _update_board_colors() -> void:
 		var tile: TileBase = match_ctrl.grid.get_tile(hex)
 		var poly: Polygon2D = _tile_nodes[hex]
 		poly.color = tile.get_revealed_color() if tile.revealed else Color(0.15, 0.16, 0.2)
-		var lbl: Label = poly.get_node_or_null("LabelAnchor/TileLabel") as Label
-		if lbl:
-			lbl.text = tile.get_hidden_label() if not tile.revealed else tile.display_name.substr(0, 1)
+		_refresh_tile_decor(poly, tile)
 
 
 func _update_unit_positions() -> void:
@@ -437,7 +494,7 @@ func _set_mode(mode: String) -> void:
 		return
 	_action_mode = mode
 	_move_targets.clear()
-	_selected_unit = null
+	_deselect_unit()
 	_update_move_button_label()
 	_clear_move_paths()
 	_update_unit_visual_states()
@@ -563,6 +620,7 @@ func _update_move_button_label() -> void:
 # --- Per-frame hover: unit highlight, tile tooltip, move path preview ---
 func _process(_delta: float) -> void:
 	_sync_camera_dependent_visuals()
+	_position_unit_popup()
 	if _ai_running or _match_ending or _move_animating:
 		if _match_ending:
 			_tile_tooltip.visible = false
@@ -591,7 +649,10 @@ func _process(_delta: float) -> void:
 			_update_move_path_preview(Vector2i(999999, 999999))
 
 
-func _input(event: InputEvent) -> void:
+## Board input is deliberately "unhandled": the sidebar and the unit popup are
+## ordinary Controls that swallow their own clicks, so a press only reaches the
+## board when it landed on empty space.
+func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_Q:
@@ -602,6 +663,9 @@ func _input(event: InputEvent) -> void:
 				return
 			KEY_R:
 				_reset_camera_view()
+				return
+			KEY_ESCAPE:
+				_deselect_unit()
 				return
 	if _match_ending or _move_animating:
 		return
@@ -773,13 +837,58 @@ func _on_end_turn() -> void:
 	_submit_action("end_turn", {})
 
 
-# --- Unit inspection panel: stats text + contextual quick-action buttons ---
-func _setup_unit_action_panel() -> void:
+# --- Unit inspection popup: stats and quick actions beside the unit itself ---
+## Anchored to the clicked unit rather than the sidebar so the player's focus
+## stays on the board. Buttons consume their own clicks, which is why board
+## input runs through _unhandled_input.
+func _setup_unit_popup() -> void:
+	_unit_popup = PanelContainer.new()
+	_unit_popup.name = "UnitPopup"
+	_unit_popup.visible = false
+	_unit_popup.z_index = 250
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.08, 0.11, 0.96)
+	style.border_color = Color(0.45, 0.5, 0.6, 0.9)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(5)
+	style.set_content_margin_all(8)
+	_unit_popup.add_theme_stylebox_override("panel", style)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 5)
+	_unit_popup.add_child(vbox)
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 6)
+	vbox.add_child(header)
+
+	_unit_popup_title = Label.new()
+	_unit_popup_title.add_theme_font_size_override("font_size", 15)
+	_unit_popup_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(_unit_popup_title)
+
+	var close_button := Button.new()
+	close_button.text = "X"
+	close_button.tooltip_text = "Close (Esc)."
+	close_button.focus_mode = Control.FOCUS_NONE
+	close_button.custom_minimum_size = Vector2(24, 0)
+	close_button.pressed.connect(_deselect_unit)
+	header.add_child(close_button)
+
+	_unit_popup_info = Label.new()
+	_unit_popup_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_unit_popup_info.custom_minimum_size = Vector2(UNIT_POPUP_WIDTH, 0)
+	_unit_popup_info.add_theme_font_size_override("font_size", 11)
+	vbox.add_child(_unit_popup_info)
+
+	vbox.add_child(HSeparator.new())
+
 	_unit_actions_box = VBoxContainer.new()
 	_unit_actions_box.add_theme_constant_override("separation", 4)
-	var sidebar: Node = unit_info.get_parent()
-	sidebar.add_child(_unit_actions_box)
-	sidebar.move_child(_unit_actions_box, unit_info.get_index())
+	vbox.add_child(_unit_actions_box)
+
+	add_child(_unit_popup)
 
 
 func _select_unit(unit: UnitBase) -> void:
@@ -790,17 +899,46 @@ func _select_unit(unit: UnitBase) -> void:
 
 func _deselect_unit() -> void:
 	_selected_unit = null
-	unit_info.text = "Click a unit to view details and available actions."
 	_clear_unit_action_buttons()
+	if _unit_popup != null:
+		_unit_popup.visible = false
 	_update_unit_visual_states()
 
 
 func _update_unit_info_panel() -> void:
 	_clear_unit_action_buttons()
-	if _selected_unit == null or not _selected_unit.is_alive:
+	if _unit_popup == null:
 		return
-	unit_info.text = _build_unit_info_text(_selected_unit)
+	if _selected_unit == null or not _selected_unit.is_alive:
+		_unit_popup.visible = false
+		return
+	_unit_popup_title.text = _selected_unit.display_name
+	_unit_popup_info.text = _build_unit_info_text(_selected_unit)
 	_rebuild_unit_action_buttons(_selected_unit)
+	_unit_popup.visible = true
+	_position_unit_popup()
+
+
+## Keeps the popup pinned beside its unit, flipping sides and clamping so it
+## never slides under the sidebar or off-screen.
+func _position_unit_popup() -> void:
+	if _unit_popup == null or not _unit_popup.visible or _selected_unit == null:
+		return
+	if not _unit_nodes.has(_selected_unit.id):
+		_unit_popup.visible = false
+		return
+
+	var unit_node: Node2D = _unit_nodes[_selected_unit.id]
+	var anchor: Vector2 = get_global_transform().affine_inverse() * _actor_layer.to_global(unit_node.position)
+	var popup_size: Vector2 = _unit_popup.size.max(_unit_popup.get_combined_minimum_size())
+	var right_limit: float = size.x - SIDEBAR_WIDTH - popup_size.x - 8.0
+
+	var pos: Vector2 = Vector2(anchor.x + UNIT_POPUP_GAP, anchor.y - popup_size.y * 0.5)
+	if pos.x > right_limit:
+		pos.x = anchor.x - UNIT_POPUP_GAP - popup_size.x
+	pos.x = clampf(pos.x, 8.0, maxf(8.0, right_limit))
+	pos.y = clampf(pos.y, 8.0, maxf(8.0, size.y - popup_size.y - 8.0))
+	_unit_popup.position = pos
 
 
 func _build_unit_info_text(unit: UnitBase) -> String:
@@ -810,7 +948,7 @@ func _build_unit_info_text(unit: UnitBase) -> String:
 	if GameState.is_solo():
 		owner_label = "You" if unit.owner_id == 0 else "AI"
 
-	lines.append("%s" % unit.display_name)
+	# The name is omitted here: the popup shows it as the panel title.
 	var tags: PackedStringArray = PackedStringArray()
 	if unit.is_leader:
 		tags.append("Leader")
@@ -958,6 +1096,7 @@ func _add_unit_action_button(text: String, enabled: bool, hint: String, callback
 	btn.text = text
 	btn.disabled = not enabled
 	btn.tooltip_text = hint
+	btn.add_theme_font_size_override("font_size", 12)
 	btn.pressed.connect(callback)
 	_unit_actions_box.add_child(btn)
 
@@ -965,7 +1104,10 @@ func _add_unit_action_button(text: String, enabled: bool, hint: String, callback
 func _clear_unit_action_buttons() -> void:
 	if _unit_actions_box == null:
 		return
+	# Detached immediately rather than only queued, so the popup never measures
+	# itself against a stale set of buttons on the frame it is rebuilt.
 	for child in _unit_actions_box.get_children():
+		_unit_actions_box.remove_child(child)
 		child.queue_free()
 
 
@@ -1081,7 +1223,7 @@ func _sync_camera_dependent_visuals() -> void:
 
 	var inverse_squash: float = 1.0 / maxf(squash, 0.05)
 	for hex in _tile_nodes:
-		var anchor: Node2D = _tile_nodes[hex].get_node_or_null("LabelAnchor") as Node2D
+		var anchor: Node2D = _tile_nodes[hex].get_node_or_null("Upright") as Node2D
 		if anchor != null:
 			anchor.rotation = -yaw
 			anchor.scale = Vector2(1.0, inverse_squash)
@@ -1489,6 +1631,7 @@ func _find_losing_leader_position(loser_id: int) -> Vector2:
 func _on_match_over(winner_id: int) -> void:
 	_match_ending = true
 	GameState.last_winner_id = winner_id
+	_deselect_unit()
 	_update_action_buttons()
 
 	var local_player_id: int = 0 if GameState.is_solo() else GameState.get_local_player_id()
