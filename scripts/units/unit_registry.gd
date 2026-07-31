@@ -234,6 +234,10 @@ class EmberFollowerUnit extends UnitBase:
 		return "Double Strike (2 RP): Immediately perform a basic attack."
 
 
+	func ability_requires_enemy_target() -> bool:
+		return true
+
+
 static func _make_ember_leader() -> UnitBase:
 	return EmberLeaderUnit.new()
 

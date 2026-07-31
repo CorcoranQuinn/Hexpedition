@@ -61,7 +61,10 @@ static func _try_summon(match_ctrl: MatchController, player_id: int) -> bool:
 			continue
 		if unit.get_unit_type_id() != "swarm_leader" and unit.get_unit_type_id() != "swarm_follower":
 			continue
-		if not unit.can_use_ability(match_ctrl.resource_points[player_id]):
+		if not unit.can_use_ability(
+			match_ctrl.resource_points[player_id],
+			match_ctrl.turn_manager.can_spend_action(),
+		):
 			continue
 		if _count_minions(match_ctrl, player_id) >= MAX_MINIONS_PER_PLAYER:
 			continue
@@ -79,12 +82,32 @@ static func _try_ability(match_ctrl: MatchController, player_id: int) -> bool:
 			continue
 		if unit.get_unit_type_id() == "swarm_leader" or unit.get_unit_type_id() == "swarm_follower":
 			continue
-		if not unit.can_use_ability(match_ctrl.resource_points[player_id]):
+		if not unit.can_use_ability(
+			match_ctrl.resource_points[player_id],
+			match_ctrl.turn_manager.can_spend_action(),
+		):
 			continue
-		var result: Dictionary = match_ctrl.perform_ability(player_id, unit.id)
+		var extra: Dictionary = {}
+		if unit.ability_requires_enemy_target():
+			var target: UnitBase = _best_ability_target(match_ctrl, unit)
+			if target == null:
+				continue
+			extra["target_id"] = target.id
+		var result: Dictionary = match_ctrl.perform_ability(player_id, unit.id, extra)
 		if result.get("success", false):
 			return true
 	return false
+
+
+static func _best_ability_target(match_ctrl: MatchController, unit: UnitBase) -> UnitBase:
+	var best_target: UnitBase = null
+	for enemy in match_ctrl.get_enemies_of(unit.owner_id):
+		if unit.can_attack(enemy, func(a, b): return match_ctrl.has_line_of_sight(a, b)):
+			if enemy.is_leader:
+				return enemy
+			if best_target == null or not best_target.is_leader:
+				best_target = enemy
+	return best_target
 
 
 static func _try_move(match_ctrl: MatchController, player_id: int) -> bool:

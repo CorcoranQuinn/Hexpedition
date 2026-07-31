@@ -59,3 +59,7 @@ func blocks_movement() -> bool:
 
 func blocks_projectiles() -> bool:
 	return false
+
+
+func get_effect_description() -> String:
+	return "No special effect."

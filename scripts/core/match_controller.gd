@@ -64,6 +64,17 @@ func _generate_board() -> void:
 			reserved,
 		)
 
+	_reveal_starting_terrain("mountain")
+
+
+func _reveal_starting_terrain(type_id: String) -> void:
+	var hexes: Array[Vector2i] = []
+	for hex in _pending_reveal.keys():
+		if _pending_reveal[hex] == type_id:
+			hexes.append(hex)
+	for hex in hexes:
+		_reveal_hex_if_hidden(hex)
+
 
 func _get_reserved_hexes() -> Dictionary:
 	var reserved: Dictionary = {}
@@ -179,6 +190,45 @@ func can_move_unit_to(unit: UnitBase, target: Vector2i, pending_moves: Dictionar
 	return _can_move_unit(unit, target, pending_moves)
 
 
+func find_movement_path(unit: UnitBase, target: Vector2i, pending_moves: Dictionary = {}) -> Array[Vector2i]:
+	var start: Vector2i = unit.hex_position
+	if target == start:
+		return [start]
+	if not _can_move_unit(unit, target, pending_moves):
+		return []
+
+	var queue: Array[Vector2i] = [start]
+	var came_from: Dictionary = {start: start}
+	var dist: Dictionary = {start: 0}
+
+	while not queue.is_empty():
+		var hex: Vector2i = queue.pop_front()
+		if hex == target:
+			break
+		var cost: int = dist[hex]
+		if cost >= unit.move_range:
+			continue
+		for neighbor in HexCoords.neighbors(hex):
+			if came_from.has(neighbor):
+				continue
+			if not _is_walkable_for_move(unit, neighbor, target, pending_moves):
+				continue
+			came_from[neighbor] = hex
+			dist[neighbor] = cost + 1
+			queue.append(neighbor)
+
+	if not came_from.has(target):
+		return []
+
+	var path: Array[Vector2i] = []
+	var current: Vector2i = target
+	while current != start:
+		path.push_front(current)
+		current = came_from[current]
+	path.push_front(start)
+	return path
+
+
 func can_apply_moves(player_id: int, moves: Dictionary) -> Dictionary:
 	for unit_id in moves:
 		var unit: UnitBase = _find_unit(unit_id)
@@ -214,13 +264,16 @@ func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
 		var unit: UnitBase = _find_unit(unit_id)
 		var target: Vector2i = moves[unit_id]
 		if target != unit.hex_position:
+			var path: Array[Vector2i] = find_movement_path(unit, target, moves)
+			for hex in path:
+				_reveal_hex_if_hidden(hex)
 			unit.hex_position = target
-			_reveal_hex_if_hidden(target)
 			grid.on_unit_entered(target, unit)
 
 	_add_resource(player_id, 1)
-	turn_manager.spend_action()
-	_after_action_spent(player_id)
+	var spent: Dictionary = _spend_action_point(player_id)
+	if not spent.get("success", false):
+		return spent
 	action_log.emit("Player %d moved units (+1 RP)." % (player_id + 1))
 	state_changed.emit()
 	return {"success": true}
@@ -241,6 +294,10 @@ func perform_attack(player_id: int, attacker_id: String, target_id: String) -> D
 	if not attacker.can_attack(target, func(a, b): return has_line_of_sight(a, b)):
 		return _fail("Target out of range, blocked by terrain, or invalid.")
 
+	var spent: Dictionary = _spend_action_point(player_id)
+	if not spent.get("success", false):
+		return spent
+
 	var damage: int = attacker.perform_basic_attack(target)
 	_emit_combat_event("attack", {
 		"attacker_id": attacker.id,
@@ -248,8 +305,6 @@ func perform_attack(player_id: int, attacker_id: String, target_id: String) -> D
 		"damage": damage,
 		"target_killed": not target.is_alive,
 	})
-	turn_manager.spend_action()
-	_after_action_spent(player_id)
 	action_log.emit("%s hit %s for %d damage." % [
 		attacker.display_name, target.display_name, damage
 	])
@@ -267,14 +322,16 @@ func perform_ability(player_id: int, unit_id: String, extra: Dictionary = {}) ->
 		return _fail("Invalid unit.")
 	if not unit.is_player_controllable():
 		return _fail("That unit is AI-controlled.")
-	if not unit.can_use_ability(resource_points[player_id]):
+	if not unit.can_use_ability(resource_points[player_id], turn_manager.can_spend_action()):
+		if not turn_manager.can_spend_action():
+			return _fail("No actions left.")
 		return _fail("Not enough resource points (need %d)." % unit.ability_cost)
 
 	var ctx: Dictionary = {
 		"allies": units,
 		"enemies": get_enemies_of(player_id),
 		"grid": grid,
-		"target": extra.get("target", null),
+		"target": _resolve_ability_target(extra),
 		"summon_hex": extra.get("summon_hex", Vector2i(-999, -999)),
 		"line_of_sight_check": func(a, b): return has_line_of_sight(a, b),
 		"reveal_hex": func(h): reveal_hex(h),
@@ -285,6 +342,7 @@ func perform_ability(player_id: int, unit_id: String, extra: Dictionary = {}) ->
 		return result
 
 	resource_points[player_id] -= unit.ability_cost
+
 	var ability_event: Dictionary = {
 		"unit_id": unit.id,
 		"ability_type": unit.get_unit_type_id(),
@@ -301,12 +359,20 @@ func perform_ability(player_id: int, unit_id: String, extra: Dictionary = {}) ->
 	if result.has("healed_unit_ids"):
 		ability_event["healed_unit_ids"] = result["healed_unit_ids"]
 	_emit_combat_event("ability", ability_event)
-	turn_manager.spend_action()
-	_after_action_spent(player_id)
+	var spent: Dictionary = _spend_action_point(player_id)
+	if not spent.get("success", false):
+		resource_points[player_id] += unit.ability_cost
+		return spent
 	action_log.emit(result.get("message", "Ability used."))
 	_check_win()
 	state_changed.emit()
 	return result
+
+
+func _resolve_ability_target(extra: Dictionary) -> UnitBase:
+	if extra.has("target_id"):
+		return _find_unit(str(extra.get("target_id", "")))
+	return extra.get("target", null)
 
 
 func perform_tile_interact(player_id: int, unit_id: String) -> Dictionary:
@@ -333,8 +399,9 @@ func perform_tile_interact(player_id: int, unit_id: String) -> Dictionary:
 	if not result.get("success", false):
 		return result
 
-	turn_manager.spend_action()
-	_after_action_spent(player_id)
+	var spent: Dictionary = _spend_action_point(player_id)
+	if not spent.get("success", false):
+		return spent
 	action_log.emit(result.get("message", "Tile interaction."))
 	state_changed.emit()
 	return result
@@ -389,6 +456,14 @@ func end_turn_with_minions(player_id: int) -> void:
 	state_changed.emit()
 
 
+func _spend_action_point(player_id: int) -> Dictionary:
+	if not turn_manager.can_spend_action():
+		return _fail("No actions left.")
+	turn_manager.spend_action()
+	_after_action_spent(player_id)
+	return {"success": true}
+
+
 func _after_action_spent(player_id: int) -> void:
 	if turn_manager.actions_remaining <= 0:
 		run_minion_phase(player_id)
@@ -411,26 +486,34 @@ func _can_move_unit(unit: UnitBase, target: Vector2i, pending_moves: Dictionary 
 				return false
 		else:
 			return false
-	var dist: int = _movement_distance(unit.hex_position, target)
+	var dist: int = _movement_distance(unit.hex_position, target, pending_moves)
 	return dist >= 0 and dist <= unit.move_range
 
 
-func reveal_hex(hex: Vector2i) -> void:
+func _is_walkable_for_move(
+	unit: UnitBase,
+	hex: Vector2i,
+	target: Vector2i,
+	pending_moves: Dictionary,
+) -> bool:
 	if not grid.has_tile(hex):
-		return
-	_reveal_hex_if_hidden(hex)
-	state_changed.emit()
+		return false
+	if _blocks_movement_at(hex):
+		return false
+	if hex == target:
+		return true
+	var occupant: UnitBase = get_unit_at(hex)
+	if occupant == null:
+		return true
+	if occupant.id == unit.id:
+		return true
+	if pending_moves.has(occupant.id):
+		var occupant_dest: Vector2i = pending_moves[occupant.id]
+		return occupant_dest != hex
+	return false
 
 
-func has_line_of_sight(from_hex: Vector2i, to_hex: Vector2i) -> bool:
-	var path: Array[Vector2i] = HexCoords.line_of_sight_path(from_hex, to_hex)
-	for i in range(1, path.size() - 1):
-		if _blocks_projectiles_at(path[i]):
-			return false
-	return true
-
-
-func _movement_distance(from_hex: Vector2i, to_hex: Vector2i) -> int:
+func _movement_distance(from_hex: Vector2i, to_hex: Vector2i, pending_moves: Dictionary = {}) -> int:
 	if from_hex == to_hex:
 		return 0
 	if not grid.has_tile(to_hex) or _blocks_movement_at(to_hex):
@@ -450,11 +533,31 @@ func _movement_distance(from_hex: Vector2i, to_hex: Vector2i) -> int:
 				continue
 			if _blocks_movement_at(neighbor):
 				continue
-			if get_unit_at(neighbor) != null and neighbor != to_hex:
-				continue
+			if neighbor != to_hex and get_unit_at(neighbor) != null:
+				var blocker: UnitBase = get_unit_at(neighbor)
+				if not pending_moves.has(blocker.id):
+					continue
+				var vacating_dest: Vector2i = pending_moves[blocker.id]
+				if vacating_dest == neighbor:
+					continue
 			visited[neighbor] = true
 			queue.append([neighbor, cost + 1])
 	return -1
+
+
+func reveal_hex(hex: Vector2i) -> void:
+	if not grid.has_tile(hex):
+		return
+	_reveal_hex_if_hidden(hex)
+	state_changed.emit()
+
+
+func has_line_of_sight(from_hex: Vector2i, to_hex: Vector2i) -> bool:
+	var path: Array[Vector2i] = HexCoords.line_of_sight_path(from_hex, to_hex)
+	for i in range(1, path.size() - 1):
+		if _blocks_projectiles_at(path[i]):
+			return false
+	return true
 
 
 func _blocks_movement_at(hex: Vector2i) -> bool:

@@ -44,6 +44,10 @@ class HiddenTile extends TileBase:
 		return Color(0.2, 0.22, 0.28)
 
 
+	func get_effect_description() -> String:
+		return "Hidden tile — move a unit here to reveal."
+
+
 class PlainTile extends TileBase:
 	func _init(hex: Vector2i) -> void:
 		hex_position = hex
@@ -55,6 +59,9 @@ class PlainTile extends TileBase:
 
 	func get_revealed_color() -> Color:
 		return Color(0.45, 0.48, 0.42)
+
+	func get_effect_description() -> String:
+		return "Open ground. No special effect."
 
 
 class MountainTile extends TileBase:
@@ -75,6 +82,9 @@ class MountainTile extends TileBase:
 	func blocks_projectiles() -> bool:
 		return true
 
+	func get_effect_description() -> String:
+		return "Impassable. Blocks movement and line of sight."
+
 
 class RoughTile extends TileBase:
 	func _init(hex: Vector2i) -> void:
@@ -91,6 +101,9 @@ class RoughTile extends TileBase:
 	func movement_cost_modifier() -> int:
 		return 1
 
+	func get_effect_description() -> String:
+		return "Difficult terrain. Costs extra movement."
+
 
 class VitalityTile extends TileBase:
 	func _init(hex: Vector2i) -> void:
@@ -106,6 +119,9 @@ class VitalityTile extends TileBase:
 
 	func on_unit_enter(unit: UnitBase) -> void:
 		unit.heal(1)
+
+	func get_effect_description() -> String:
+		return "Restores 1 HP when a unit enters."
 
 
 static func _make_hidden(hex: Vector2i, _team: int = -1) -> TileBase:
@@ -151,6 +167,9 @@ class SentinelBastionTile extends TileBase:
 	func can_interact(unit: UnitBase) -> bool:
 		return super.can_interact(unit)
 
+	func get_effect_description() -> String:
+		return "Team tile — interact for +3 defense this turn."
+
 
 class VeilMirrorTile extends TileBase:
 	func _init(hex: Vector2i, p_team: int) -> void:
@@ -181,6 +200,9 @@ class VeilMirrorTile extends TileBase:
 			reveal_hex.call(far_hex)
 		return {"success": true, "message": "Mirror Veil scried a distant tile."}
 
+	func get_effect_description() -> String:
+		return "Team tile — interact to reveal a distant hex."
+
 
 class EmberForgeTile extends TileBase:
 	func _init(hex: Vector2i, p_team: int) -> void:
@@ -199,6 +221,9 @@ class EmberForgeTile extends TileBase:
 	func interact(unit: UnitBase, _context: Dictionary) -> Dictionary:
 		unit.damage_bonus += 2
 		return {"success": true, "message": "Ember Forge empowers your next attack (+2)."}
+
+	func get_effect_description() -> String:
+		return "Team tile — interact for +2 attack damage this turn."
 
 
 class SwarmHiveTile extends TileBase:
@@ -223,6 +248,9 @@ class SwarmHiveTile extends TileBase:
 			if summon_minion.call(neighbor) != null:
 				return {"success": true, "message": "Swarm Hive spawned a minion."}
 		return {"success": false, "message": "No adjacent space at the hive."}
+
+	func get_effect_description() -> String:
+		return "Team tile — interact to summon a minion on an adjacent hex."
 
 
 static func _make_sentinel_bastion(hex: Vector2i, team: int) -> TileBase:

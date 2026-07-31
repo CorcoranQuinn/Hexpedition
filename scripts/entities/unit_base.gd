@@ -76,8 +76,8 @@ func heal(amount: int) -> void:
 	health = mini(max_health, health + amount)
 
 
-func can_use_ability(resource_points: int) -> bool:
-	return is_alive and resource_points >= ability_cost
+func can_use_ability(resource_points: int, actions_available: bool = true) -> bool:
+	return is_alive and actions_available and resource_points >= ability_cost
 
 
 ## Override in subclasses for unique ability effects.
@@ -91,6 +91,10 @@ func use_ability(context: Dictionary) -> Dictionary:
 
 func get_ability_description() -> String:
 	return "No ability description."
+
+
+func ability_requires_enemy_target() -> bool:
+	return false
 
 
 func reset_turn_modifiers() -> void:
