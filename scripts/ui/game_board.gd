@@ -16,17 +16,23 @@ extends Control
 @onready var unit_info: Label = %UnitInfo
 
 # --- Constants & preloads ---
-const HEX_SIZE: float = 36.0
+const HEX_SIZE: float = 54.0
 const BattleEffectsScript = preload("res://scripts/ui/battle_effects.gd")
 const TileArtScript = preload("res://scripts/ui/tile_art.gd")
+const UnitArtScript = preload("res://scripts/ui/unit_art.gd")
+const CameraOrientationScript = preload("res://scripts/ui/camera_orientation.gd")
 
 # --- Isometric projection & camera ---
 ## The board is drawn on a squashed, rotatable ground plane while units stay
 ## upright, which gives a 2.5D look without needing real 3D assets.
 const ISO_SQUASH: float = 0.58  ## Vertical foreshortening of the ground plane.
-const CAMERA_ROTATION_STEP: float = PI / 3.0  ## 60 degrees — one hex face per press.
+const CAMERA_ROTATION_STEP: float = PI / 2.0  ## 90 degrees — four views around the board.
 const CAMERA_TWEEN_TIME: float = 0.3
 const UNIT_DEPTH_RANGE: int = 40  ## Largest z offset a unit may take from screen depth.
+const ZOOM_MIN: float = 0.55
+const ZOOM_MAX: float = 2.1
+const ZOOM_STEP: float = 0.08
+const DEFAULT_ZOOM: float = 1.0
 
 # --- Tile presentation ---
 const TILE_BORDER_COLOR := Color(0.03, 0.03, 0.05, 0.9)
@@ -65,6 +71,14 @@ var _unit_popup_title: Label
 var _unit_popup_info: Label
 
 # --- Camera state (see ISO_SQUASH notes above) ---
+var _camera_rig: Node2D  ## Pan + zoom container for the whole battlefield view.
+var _camera_pan: Vector2 = Vector2.ZERO
+var _camera_zoom: float = DEFAULT_ZOOM
+var _dragging_camera: bool = false
+var _drag_start_mouse: Vector2 = Vector2.ZERO
+var _drag_start_pan: Vector2 = Vector2.ZERO
+var _camera_rotating: bool = false
+var _scroll_background: Control
 var _ground_layer: Node2D  ## Applies the isometric squash in screen space.
 var _ground_pivot: Node2D  ## Applies camera yaw; tiles and move paths live here.
 var _actor_layer: Node2D  ## Upright billboards (units, VFX) at projected positions.
@@ -75,6 +89,7 @@ var _iso_enabled: bool = true
 var _camera_tween: Tween
 var _synced_yaw: float = INF  ## Guards against re-projecting when nothing moved.
 var _synced_squash: float = INF
+var _synced_orientation: int = -1
 
 # --- Leader health bars (supports teams with any number of leaders) ---
 var _player_leader_box: VBoxContainer
@@ -128,7 +143,9 @@ func _ready() -> void:
 
 	# Layers must exist before setup_match, whose state_changed signal already
 	# triggers a refresh that spawns unit visuals into the actor layer.
+	_setup_scroll_background()
 	_setup_board_layers()
+	_center_board_root()
 
 	var match_seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
 	match_ctrl.setup_match(match_seed)
@@ -152,8 +169,15 @@ func _ready() -> void:
 	await _play_map_intro()
 	await _run_placement_phase()
 	_cache_base_yaws()
-	_update_camera_for_active_player(false)
+	_update_camera_for_viewer(_get_viewer_player_id(), false)
 	_refresh_ui()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_RESIZED:
+		_center_board_root()
+		if _scroll_background:
+			_scroll_background.queue_redraw()
 
 
 # --- Turn flow callbacks ---
@@ -172,17 +196,35 @@ func _on_player_changed(_player_id: int) -> void:
 	_clear_move_paths()
 	_update_unit_visual_states()
 	# Hot-seat play swaps whose side the camera sits behind.
-	_update_camera_for_active_player(true)
+	_update_camera_for_viewer(_get_viewer_player_id(), true)
+
+
+func _setup_scroll_background() -> void:
+	_scroll_background = ScrollBackground.new()
+	_scroll_background.name = "ScrollBackground"
+	_scroll_background.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_scroll_background)
+	move_child(_scroll_background, 0)
+
+
+func _center_board_root() -> void:
+	var viewport_size: Vector2 = get_viewport_rect().size
+	var board_width: float = maxf(320.0, viewport_size.x - SIDEBAR_WIDTH)
+	board_root.position = Vector2(board_width * 0.5, viewport_size.y * 0.5)
 
 
 # --- Board layers: a squashed, rotatable ground plane plus upright actors ---
 ## Screen position = squash * yaw * board position, so the ground tilts away
 ## while units and effects stay readable at their projected spot.
 func _setup_board_layers() -> void:
+	_camera_rig = Node2D.new()
+	_camera_rig.name = "CameraRig"
+	board_root.add_child(_camera_rig)
+
 	_ground_layer = Node2D.new()
 	_ground_layer.name = "GroundLayer"
 	_ground_layer.scale = Vector2(1.0, ISO_SQUASH)
-	board_root.add_child(_ground_layer)
+	_camera_rig.add_child(_ground_layer)
 
 	_ground_pivot = Node2D.new()
 	_ground_pivot.name = "GroundPivot"
@@ -193,7 +235,8 @@ func _setup_board_layers() -> void:
 	# Must exceed UNIT_DEPTH_RANGE so that even the farthest unit, which takes
 	# the most negative depth offset, still sorts above the ground plane.
 	_actor_layer.z_index = 50
-	board_root.add_child(_actor_layer)
+	_camera_rig.add_child(_actor_layer)
+	_apply_camera_transform()
 
 
 func _project_point(board_point: Vector2) -> Vector2:
@@ -273,7 +316,7 @@ func _run_placement_phase() -> void:
 	while match_ctrl.placement_active:
 		var pid: int = match_ctrl.placement_player
 		_camera_owner_id = -1
-		_update_camera_for_active_player(true)
+		_update_camera_for_viewer(_get_viewer_player_id(), true)
 		_select_next_placement_unit(pid)
 		_refresh_placement_highlights()
 		_update_placement_ui()
@@ -537,7 +580,9 @@ func _refresh_tile_decor(poly: Polygon2D, tile: TileBase) -> void:
 	var anchor: Node2D = poly.get_node_or_null("Upright") as Node2D
 	if anchor == null:
 		return
-	var previous: Node = anchor.get_node_or_null("Decor")
+	var previous: Node = anchor.get_node_or_null("OrientedDecor")
+	if previous == null:
+		previous = anchor.get_node_or_null("Decor")
 	if previous != null:
 		anchor.remove_child(previous)
 		previous.queue_free()
@@ -545,9 +590,11 @@ func _refresh_tile_decor(poly: Polygon2D, tile: TileBase) -> void:
 	var team_color: Color = Color.WHITE
 	if tile.is_team_unique and tile.team_id >= 0:
 		team_color = TeamRegistry.get_team(tile.team_id).team_color
-	var decor: Node2D = TileArtScript.build(type_id, team_color)
+	var decor: OrientedVisual = TileArtScript.build_oriented(type_id, team_color)
+	decor.name = "OrientedDecor"
 	anchor.add_child(decor)
 	anchor.move_child(decor, 0)
+	_update_node_orientation(decor)
 
 	# Revealed terrain speaks for itself; only fogged hexes need the glyph.
 	var label: Label = anchor.get_node_or_null("TileLabel") as Label
@@ -564,48 +611,57 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 	var container := Node2D.new()
 	container.set_meta("unit_id", unit.id)
 
-	# Squashed disc that grounds the upright billboard on the tilted plane.
+	var highlight_radius: float = HEX_SIZE * 0.47
+	var outline_radius: float = HEX_SIZE * 0.42
+	var shadow_rx: float = HEX_SIZE * 0.42
+	var shadow_ry: float = shadow_rx * ISO_SQUASH
+
+	# Squashed disc that grounds the unit marker on the tilted plane.
 	var shadow := Polygon2D.new()
 	shadow.name = "Shadow"
-	shadow.polygon = _make_ellipse_points(15.0, 15.0 * ISO_SQUASH)
+	shadow.polygon = _make_ellipse_points(shadow_rx, shadow_ry)
 	shadow.color = Color(0.0, 0.0, 0.0, 0.28)
-	shadow.position = Vector2(0, 9)
+	shadow.position = Vector2(0, HEX_SIZE * 0.24)
 	container.add_child(shadow)
 
 	var highlight := Polygon2D.new()
 	highlight.name = "Highlight"
-	highlight.polygon = _make_unit_points(17)
+	highlight.polygon = _make_unit_points(highlight_radius)
 	highlight.color = Color(1.0, 1.0, 1.0, 0.22)
 	highlight.visible = false
 	container.add_child(highlight)
 
 	var outline := Line2D.new()
 	outline.name = "Outline"
-	outline.points = _make_unit_line_points(15)
+	outline.points = _make_unit_line_points(outline_radius)
 	outline.default_color = Color(1.0, 0.92, 0.35, 0.95)
 	outline.width = 3.0
 	outline.closed = true
 	outline.visible = false
 	container.add_child(outline)
 
-	var body := Polygon2D.new()
-	body.name = "Body"
-	body.polygon = _make_unit_points(14)
 	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[unit.owner_id])
-	body.color = team.team_color
+	var oriented_body: OrientedVisual = UnitArtScript.build_oriented_board_unit(
+		unit.get_unit_type_id(),
+		team.team_color,
+		unit.is_leader,
+		unit.is_minion,
+	)
+	oriented_body.name = "OrientedBody"
 	if unit.is_minion:
-		body.scale = Vector2(0.65, 0.65)
+		oriented_body.scale = Vector2(0.65, 0.65)
 		highlight.scale = Vector2(0.65, 0.65)
 		outline.scale = Vector2(0.65, 0.65)
 		shadow.scale = Vector2(0.65, 0.65)
 	elif unit.is_leader:
-		body.scale = Vector2(1.3, 1.3)
-		highlight.scale = Vector2(1.3, 1.3)
-		outline.scale = Vector2(1.3, 1.3)
-		shadow.scale = Vector2(1.3, 1.3)
+		oriented_body.scale = Vector2(1.15, 1.15)
+		highlight.scale = Vector2(1.15, 1.15)
+		outline.scale = Vector2(1.15, 1.15)
+		shadow.scale = Vector2(1.15, 1.15)
 	if unit.is_ai_controlled:
-		body.modulate = Color(0.9, 0.95, 0.9)
-	container.add_child(body)
+		oriented_body.modulate = Color(0.9, 0.95, 0.9)
+	container.add_child(oriented_body)
+	_update_node_orientation(oriented_body)
 
 	_actor_layer.add_child(container)
 	_place_unit_node(container, unit.hex_position)
@@ -956,6 +1012,28 @@ func _process(_delta: float) -> void:
 ## ordinary Controls that swallow their own clicks, so a press only reaches the
 ## board when it landed on empty space.
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		match event.button_index:
+			MOUSE_BUTTON_WHEEL_UP:
+				if event.pressed:
+					_set_zoom(_camera_zoom + ZOOM_STEP)
+				return
+			MOUSE_BUTTON_WHEEL_DOWN:
+				if event.pressed:
+					_set_zoom(_camera_zoom - ZOOM_STEP)
+				return
+			MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE:
+				if event.pressed:
+					_dragging_camera = true
+					_drag_start_mouse = event.position
+					_drag_start_pan = _camera_pan
+				else:
+					_dragging_camera = false
+				return
+	if event is InputEventMouseMotion and _dragging_camera:
+		_camera_pan = _drag_start_pan + (event.position - _drag_start_mouse) / maxf(_camera_zoom, 0.05)
+		_apply_camera_transform()
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_Q:
@@ -1469,14 +1547,60 @@ func _cache_base_yaws() -> void:
 		_base_yaw_by_player[pid] = _compute_base_yaw(pid)
 
 
-func _update_camera_for_active_player(animate: bool) -> void:
-	var viewer: int = _get_active_player_id()
+func _update_camera_for_viewer(viewer: int, animate: bool) -> void:
 	if viewer < 0 or viewer >= _base_yaw_by_player.size():
 		return
-	if viewer == _camera_owner_id:
+	if viewer != _camera_owner_id:
+		_camera_owner_id = viewer
+		_apply_camera_orientation(animate)
+	elif animate:
+		_apply_camera_orientation(true)
+	_focus_camera_on_player(viewer)
+
+
+func _get_viewer_player_id() -> int:
+	if GameState.match_mode == GameState.MatchMode.LOCAL:
+		if match_ctrl.placement_active:
+			return match_ctrl.placement_player
+		return match_ctrl.turn_manager.current_player
+	if GameState.is_solo() or GameState.is_online():
+		return GameState.get_local_player_id()
+	return match_ctrl.turn_manager.current_player
+
+
+func _focus_camera_on_player(player_id: int) -> void:
+	if player_id < 0 or player_id >= _base_yaw_by_player.size():
 		return
-	_camera_owner_id = viewer
-	_apply_camera_orientation(animate)
+	var centroid: Vector2 = Vector2.ZERO
+	var count: int = 0
+	for unit in match_ctrl.units:
+		if unit.owner_id == player_id and match_ctrl.is_unit_placed(unit):
+			centroid += HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
+			count += 1
+	if count == 0:
+		var corner: Vector2i = MatchController.PLACEMENT_CORNERS[player_id]
+		centroid = HexCoords.axial_to_pixel(corner, HEX_SIZE)
+	else:
+		centroid /= float(count)
+	var projected: Vector2 = _project_point(centroid)
+	_camera_pan = -projected * 0.28
+	_apply_camera_transform()
+
+
+func _apply_camera_transform() -> void:
+	if _camera_rig == null:
+		return
+	_camera_rig.position = _camera_pan
+	_camera_rig.scale = Vector2.ONE * _camera_zoom
+
+
+func _set_zoom(next_zoom: float) -> void:
+	_camera_zoom = clampf(next_zoom, ZOOM_MIN, ZOOM_MAX)
+	_apply_camera_transform()
+
+
+func _update_camera_for_active_player(animate: bool) -> void:
+	_update_camera_for_viewer(_get_viewer_player_id(), animate)
 
 
 func _apply_camera_orientation(animate: bool) -> void:
@@ -1493,14 +1617,22 @@ func _apply_camera_orientation(animate: bool) -> void:
 	if not animate:
 		_ground_pivot.rotation = target_yaw
 		_ground_layer.scale.y = target_squash
+		_camera_rotating = false
 		_sync_camera_dependent_visuals()
 		return
 
+	_camera_rotating = true
 	_camera_tween = create_tween()
 	_camera_tween.set_parallel(true)
 	_camera_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	_camera_tween.tween_property(_ground_pivot, "rotation", target_yaw, CAMERA_TWEEN_TIME)
 	_camera_tween.tween_property(_ground_layer, "scale:y", target_squash, CAMERA_TWEEN_TIME)
+	_camera_tween.finished.connect(_on_camera_tween_finished)
+
+
+func _on_camera_tween_finished() -> void:
+	_camera_rotating = false
+	_sync_camera_dependent_visuals()
 
 
 func _rotate_camera(direction: int) -> void:
@@ -1515,6 +1647,7 @@ func _reset_camera_view() -> void:
 		return
 	_manual_yaw = 0.0
 	_apply_camera_orientation(true)
+	_focus_camera_on_player(_get_viewer_player_id())
 
 
 func _toggle_isometric(enabled: bool) -> void:
@@ -1522,17 +1655,22 @@ func _toggle_isometric(enabled: bool) -> void:
 	_apply_camera_orientation(true)
 
 
-## Tiles ride the ground plane, but their glyphs and the unit billboards must
-## be re-derived whenever the camera moves.
+## Tiles ride the ground plane; oriented decor and unit billboards swap between
+## eight camera-relative sprite sets (four settled, four mid-rotation).
 func _sync_camera_dependent_visuals() -> void:
 	if _ground_pivot == null or _ground_layer == null:
 		return
 	var yaw: float = _ground_pivot.rotation
 	var squash: float = _ground_layer.scale.y
-	if is_equal_approx(yaw, _synced_yaw) and is_equal_approx(squash, _synced_squash):
+	var orientation: int = CameraOrientationScript.get_orientation_index(yaw, _camera_rotating)
+	var visuals_changed: bool = not is_equal_approx(yaw, _synced_yaw) \
+		or not is_equal_approx(squash, _synced_squash) \
+		or orientation != _synced_orientation
+	if not visuals_changed:
 		return
 	_synced_yaw = yaw
 	_synced_squash = squash
+	_synced_orientation = orientation
 
 	var inverse_squash: float = 1.0 / maxf(squash, 0.05)
 	for hex in _tile_nodes:
@@ -1540,11 +1678,30 @@ func _sync_camera_dependent_visuals() -> void:
 		if anchor != null:
 			anchor.rotation = -yaw
 			anchor.scale = Vector2(1.0, inverse_squash)
+			var decor: Node = anchor.get_node_or_null("OrientedDecor")
+			if decor is OrientedVisual:
+				(decor as OrientedVisual).set_orientation(orientation)
+
+	for unit_id in _unit_nodes:
+		var container: Node2D = _unit_nodes[unit_id]
+		var oriented: Node = container.get_node_or_null("OrientedBody")
+		if oriented is OrientedVisual:
+			(oriented as OrientedVisual).set_orientation(orientation)
 
 	for unit in match_ctrl.units:
 		if not _unit_nodes.has(unit.id) or _suppress_position_snap.has(unit.id):
 			continue
 		_place_unit_node(_unit_nodes[unit.id], unit.hex_position)
+
+
+func _update_node_orientation(node: OrientedVisual) -> void:
+	if _ground_pivot == null:
+		return
+	var orientation: int = CameraOrientationScript.get_orientation_index(
+		_ground_pivot.rotation,
+		_camera_rotating,
+	)
+	node.set_orientation(orientation)
 
 
 func _setup_camera_controls() -> void:
@@ -1560,6 +1717,22 @@ func _setup_camera_controls() -> void:
 	row.add_child(_make_camera_button("Reset", "Face your own side again (R).", _reset_camera_view))
 	box.add_child(row)
 
+	var zoom_row := HBoxContainer.new()
+	zoom_row.add_theme_constant_override("separation", 4)
+	var zoom_out := _make_camera_button("Zoom -", "Zoom out (mouse wheel down).", Callable())
+	zoom_out.pressed.connect(func() -> void: _set_zoom(_camera_zoom - ZOOM_STEP))
+	var zoom_in := _make_camera_button("Zoom +", "Zoom in (mouse wheel up).", Callable())
+	zoom_in.pressed.connect(func() -> void: _set_zoom(_camera_zoom + ZOOM_STEP))
+	zoom_row.add_child(zoom_out)
+	zoom_row.add_child(zoom_in)
+	box.add_child(zoom_row)
+
+	var hint := Label.new()
+	hint.text = "Drag with right or middle mouse to pan."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.modulate = Color(0.82, 0.84, 0.88)
+	box.add_child(hint)
+
 	var iso_toggle := CheckButton.new()
 	iso_toggle.text = "Isometric View"
 	iso_toggle.tooltip_text = "Toggle between the tilted board and a flat top-down view."
@@ -1571,13 +1744,14 @@ func _setup_camera_controls() -> void:
 	sidebar.move_child(box, rp_label.get_index() + 1)
 
 
-func _make_camera_button(text: String, hint: String, callback: Callable) -> Button:
+func _make_camera_button(text: String, hint: String, callback: Callable = Callable()) -> Button:
 	var btn := Button.new()
 	btn.text = text
 	btn.tooltip_text = hint
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.pressed.connect(callback)
+	if callback.is_valid():
+		btn.pressed.connect(callback)
 	return btn
 
 

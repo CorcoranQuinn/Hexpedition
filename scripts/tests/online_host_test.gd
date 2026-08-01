@@ -43,8 +43,10 @@ func _run() -> void:
 			break
 		await process_frame
 	check(gs.selected_team_ids[1] >= 0, "received client team selection (team %d)" % gs.selected_team_ids[1])
-	check(gs.all_teams_selected(), "both teams selected on host (%s)" % [gs.selected_team_ids])
+	check(gs.all_teams_locked(), "both teams locked on host (%s)" % [gs.selected_team_ids])
 	check(nm.is_server(), "host is server")
+
+	nm.request_start_if_ready()
 
 	deadline = Time.get_ticks_msec() + 10000
 	while Time.get_ticks_msec() < deadline:

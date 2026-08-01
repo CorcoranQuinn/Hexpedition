@@ -30,6 +30,21 @@ static func build(type_id: String, team_color: Color = Color.WHITE) -> Node2D:
 	return root
 
 
+static func build_oriented(type_id: String, team_color: Color = Color.WHITE) -> OrientedVisual:
+	var visual := OrientedVisual.new()
+	visual.name = "OrientedDecor"
+	var layers: Array[Node2D] = []
+	for i in CameraOrientation.ORIENTATION_COUNT:
+		var layer := Node2D.new()
+		layer.name = "Orientation%d" % i
+		var decor: Node2D = build(type_id, team_color)
+		CameraOrientation.apply_orientation_pose(decor, i)
+		layer.add_child(decor)
+		layers.append(layer)
+	visual.setup(layers)
+	return visual
+
+
 # --- Neutral terrain ---
 
 ## Sparse grass blades, kept low-contrast so units stay the focal point.

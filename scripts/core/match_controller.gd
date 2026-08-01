@@ -77,7 +77,7 @@ func _generate_board() -> void:
 		_pending_reveal[hex] = "plain"
 		grid.set_tile(hex, TileRegistry.create("hidden", hex))
 
-	_scatter_tile_type("mountain", MOUNTAIN_COUNT, reserved)
+	_scatter_tile_type("mountain", MOUNTAIN_COUNT, _get_mountain_reserved_hexes(all_hexes))
 
 	for tile_def in UNIQUE_TILE_DEFS:
 		_scatter_unique_tile(
@@ -110,6 +110,23 @@ func _get_reserved_hexes(all_hexes: Array) -> Dictionary:
 	return reserved
 
 
+## Mountains must not appear on the center split band — that boundary is only
+## used for spawn zones and home-base assignment, not as a map-wide barrier.
+func _get_mountain_reserved_hexes(all_hexes: Array) -> Dictionary:
+	var reserved: Dictionary = _get_reserved_hexes(all_hexes)
+	for hex in all_hexes:
+		if _is_center_split_hex(hex):
+			reserved[hex] = true
+	return reserved
+
+
+## True on hexes equidistant from both deployment corners (the map midpoint band).
+func _is_center_split_hex(hex: Vector2i) -> bool:
+	var dist_p0: int = HexCoords.distance(hex, PLACEMENT_CORNERS[0])
+	var dist_p1: int = HexCoords.distance(hex, PLACEMENT_CORNERS[1])
+	return dist_p0 == dist_p1
+
+
 func get_placement_zone(player_id: int) -> Array[Vector2i]:
 	return _collect_placement_zone(grid.get_all_hexes(), player_id)
 
@@ -123,10 +140,12 @@ func _collect_placement_zone(hexes: Array, player_id: int) -> Array[Vector2i]:
 
 
 func _is_on_player_side(hex: Vector2i, player_id: int) -> bool:
+	return not _is_center_split_hex(hex) and _is_closer_to_corner(hex, player_id)
+
+
+func _is_closer_to_corner(hex: Vector2i, player_id: int) -> bool:
 	var dist_p0: int = HexCoords.distance(hex, PLACEMENT_CORNERS[0])
 	var dist_p1: int = HexCoords.distance(hex, PLACEMENT_CORNERS[1])
-	if dist_p0 == dist_p1:
-		return false
 	return dist_p0 < dist_p1 if player_id == 0 else dist_p1 < dist_p0
 
 

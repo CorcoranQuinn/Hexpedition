@@ -27,7 +27,7 @@ func _on_remote_rematch(same_teams: bool) -> void:
 		get_tree().change_scene_to_file("res://scenes/game_board.tscn")
 	else:
 		GameState.pending_rematch_new_select = true
-		GameState.selected_team_ids = [-1, -1]
+		GameState.reset_match_state()
 		get_tree().change_scene_to_file("res://scenes/character_select.tscn")
 
 
@@ -40,7 +40,7 @@ func _on_rematch() -> void:
 
 func _on_new_select() -> void:
 	GameState.pending_rematch_new_select = true
-	GameState.selected_team_ids = [-1, -1]
+	GameState.reset_match_state()
 	if GameState.is_online():
 		NetworkManager.request_rematch(false)
 	get_tree().change_scene_to_file("res://scenes/character_select.tscn")

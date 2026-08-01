@@ -6,6 +6,8 @@ signal connection_failed
 signal peer_connected(peer_id: int)
 signal peer_disconnected(peer_id: int)
 signal selection_updated(player_id: int, team_id: int)
+signal hover_updated(player_id: int, team_id: int)
+signal lock_updated(player_id: int, team_id: int, locked: bool)
 signal match_start_requested
 signal rematch_requested(same_teams: bool)
 signal action_applied(action_type: String, payload: Dictionary, result: Dictionary)
@@ -100,8 +102,36 @@ func rpc_submit_team_selection(player_id: int, team_id: int) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func rpc_sync_team_selection(player_id: int, team_id: int) -> void:
-	GameState.set_team_selection(player_id, team_id)
+	GameState.lock_team(player_id, team_id)
 	selection_updated.emit(player_id, team_id)
+	lock_updated.emit(player_id, team_id, true)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func rpc_submit_team_hover(player_id: int, team_id: int) -> void:
+	if not _mp().is_server():
+		return
+	_apply_team_hover(player_id, team_id)
+
+
+@rpc("authority", "call_local", "reliable")
+func rpc_sync_team_hover(player_id: int, team_id: int) -> void:
+	GameState.set_team_hover(player_id, team_id)
+	hover_updated.emit(player_id, team_id)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func rpc_submit_team_unlock(player_id: int) -> void:
+	if not _mp().is_server():
+		return
+	_apply_team_unlock(player_id)
+
+
+@rpc("authority", "call_local", "reliable")
+func rpc_sync_team_unlock(player_id: int) -> void:
+	GameState.unlock_team(player_id)
+	lock_updated.emit(player_id, -1, false)
+	selection_updated.emit(player_id, -1)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -165,16 +195,40 @@ func submit_action(action_type: String, payload: Dictionary) -> void:
 
 func submit_team_selection(player_id: int, team_id: int) -> void:
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
-		GameState.set_team_selection(player_id, team_id)
+		GameState.lock_team(player_id, team_id)
 		selection_updated.emit(player_id, team_id)
+		lock_updated.emit(player_id, team_id, true)
 	elif _mp().is_server():
 		_apply_team_selection(player_id, team_id)
 	else:
 		rpc_submit_team_selection.rpc_id(1, player_id, team_id)
 
 
+func submit_team_hover(player_id: int, team_id: int) -> void:
+	if GameState.team_locked[player_id]:
+		return
+	if GameState.match_mode == GameState.MatchMode.LOCAL:
+		GameState.set_team_hover(player_id, team_id)
+		hover_updated.emit(player_id, team_id)
+	elif _mp().is_server():
+		_apply_team_hover(player_id, team_id)
+	else:
+		rpc_submit_team_hover.rpc_id(1, player_id, team_id)
+
+
+func submit_team_unlock(player_id: int) -> void:
+	if GameState.match_mode == GameState.MatchMode.LOCAL:
+		GameState.unlock_team(player_id)
+		lock_updated.emit(player_id, -1, false)
+		selection_updated.emit(player_id, -1)
+	elif _mp().is_server():
+		_apply_team_unlock(player_id)
+	else:
+		rpc_submit_team_unlock.rpc_id(1, player_id)
+
+
 func request_start_if_ready() -> void:
-	if not GameState.all_teams_selected():
+	if not GameState.all_teams_locked():
 		return
 	if GameState.match_seed >= 0:
 		return
@@ -209,10 +263,18 @@ func _apply_team_selection(player_id: int, team_id: int) -> void:
 	if not _is_authority_for_selection(player_id):
 		return
 	rpc_sync_team_selection.rpc(player_id, team_id)
-	if GameState.all_teams_selected():
-		var seed_value: int = randi()
-		GameState.match_seed = seed_value
-		rpc_start_match.rpc(seed_value)
+
+
+func _apply_team_hover(player_id: int, team_id: int) -> void:
+	if not _is_authority_for_selection(player_id):
+		return
+	rpc_sync_team_hover.rpc(player_id, team_id)
+
+
+func _apply_team_unlock(player_id: int) -> void:
+	if not _is_authority_for_selection(player_id):
+		return
+	rpc_sync_team_unlock.rpc(player_id)
 
 
 func _is_authority_for_selection(player_id: int) -> bool:
