@@ -14,7 +14,11 @@ extends Control
 @onready var unit_info: Label = %UnitInfo
 
 # --- Constants & preloads ---
-const HEX_SIZE: float = 54.0
+const HEX_SIZE: float = 62.0
+const UNIT_VISUAL_SCALE: float = 0.76
+const UNIT_HIT_RADIUS: float = 14.0
+const UNIT_HIT_RADIUS_LEADER: float = 17.5
+const UNIT_HIT_RADIUS_MINION: float = 10.5
 const BattleEffectsScript = preload("res://scripts/ui/battle_effects.gd")
 const TileArtScript = preload("res://scripts/ui/tile_art.gd")
 const UnitArtScript = preload("res://scripts/ui/unit_art.gd")
@@ -678,6 +682,7 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 
 	var container := Node2D.new()
 	container.set_meta("unit_id", unit.id)
+	container.scale = Vector2(UNIT_VISUAL_SCALE, UNIT_VISUAL_SCALE)
 
 	var shadow_rx: float = HEX_SIZE * 0.42
 	var shadow_ry: float = shadow_rx * ISO_SQUASH
@@ -714,7 +719,8 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 	if animate_spawn:
 		container.scale = Vector2(0.2, 0.2)
 		var pop := create_tween()
-		pop.tween_property(container, "scale", Vector2.ONE, 0.28).set_trans(Tween.TRANS_BACK)
+		var target_scale := Vector2.ONE * UNIT_VISUAL_SCALE
+		pop.tween_property(container, "scale", target_scale, 0.28).set_trans(Tween.TRANS_BACK)
 
 
 func _make_unit_points(radius: float) -> PackedVector2Array:
@@ -1024,21 +1030,16 @@ func _process(_delta: float) -> void:
 			_tile_tooltip.visible = false
 		return
 	var hex: Vector2i = _hex_under_mouse()
-	var hovered_id: String = ""
-	if match_ctrl.grid.has_tile(hex):
-		var unit: UnitBase = match_ctrl.get_unit_at(hex)
-		if unit != null and unit.is_alive:
-			hovered_id = unit.id
+	var unit_under_mouse: UnitBase = _get_unit_under_mouse()
+	var hovered_id: String = unit_under_mouse.id if unit_under_mouse != null else ""
 	if hovered_id != _hovered_unit_id:
 		_hovered_unit_id = hovered_id
 		_update_unit_visual_states()
-		if _selected_unit == null:
-			_update_unit_popup()
 
 	if _unit_popup != null and _unit_popup.visible:
 		_position_unit_popup()
 
-	if match_ctrl.grid.has_tile(hex):
+	if unit_under_mouse == null and match_ctrl.grid.has_tile(hex):
 		if hex != _hovered_hex:
 			_hovered_hex = hex
 			_update_tile_tooltip_content(hex)
@@ -1049,7 +1050,7 @@ func _process(_delta: float) -> void:
 		_hovered_hex = Vector2i(999999, 999999)
 		_tile_tooltip.visible = false
 		if _action_mode == "move":
-			_update_move_path_preview(Vector2i(999999, 999999))
+			_update_move_path_preview(hex if match_ctrl.grid.has_tile(hex) else Vector2i(999999, 999999))
 
 
 ## Board input is deliberately "unhandled": the sidebar and the unit popup are
@@ -1108,6 +1109,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var hex: Vector2i = _hex_under_mouse()
 		if not match_ctrl.grid.has_tile(hex):
+			_deselect_unit()
 			return
 		_handle_hex_click(hex)
 
@@ -1185,7 +1187,7 @@ func _handle_hex_click(hex: Vector2i) -> void:
 	if GameState.is_solo() and match_ctrl.turn_manager.current_player != 0:
 		return
 	var pid: int = _get_active_player_id()
-	var clicked_unit: UnitBase = match_ctrl.get_unit_at(hex)
+	var clicked_unit: UnitBase = _get_unit_under_mouse()
 
 	match _action_mode:
 		"":
@@ -1403,37 +1405,33 @@ func _select_unit(unit: UnitBase) -> void:
 func _deselect_unit() -> void:
 	_selected_unit = null
 	_clear_unit_action_buttons()
-	_update_unit_popup()
+	if _unit_popup != null:
+		_unit_popup.visible = false
 	_update_unit_visual_states()
-
-
-func _get_popup_unit() -> UnitBase:
-	if _selected_unit != null and _selected_unit.is_alive:
-		return _selected_unit
-	if _hovered_unit_id.is_empty():
-		return null
-	return _find_unit_by_id(_hovered_unit_id)
 
 
 func _update_unit_popup() -> void:
 	if _unit_popup == null:
 		return
-	var unit: UnitBase = _get_popup_unit()
-	if unit == null or not unit.is_alive:
+	if _selected_unit == null or not _selected_unit.is_alive:
 		_unit_popup.visible = false
 		return
 
-	var is_selected: bool = _selected_unit != null and _selected_unit.id == unit.id
-	_unit_popup.mouse_filter = Control.MOUSE_FILTER_STOP if is_selected else Control.MOUSE_FILTER_IGNORE
+	var unit: UnitBase = _selected_unit
+	_unit_popup.mouse_filter = Control.MOUSE_FILTER_STOP
 	_unit_popup_title.text = unit.display_name
 	_unit_popup_info.text = _build_unit_info_text(unit)
-	_unit_popup_separator.visible = is_selected
-	_unit_actions_box.visible = is_selected
-	_unit_popup_close_button.visible = is_selected
+	_unit_popup_close_button.visible = true
 
 	_clear_unit_action_buttons()
-	if is_selected:
+	var show_actions: bool = false
+	if unit.owner_id == _get_active_player_id() \
+			and unit.is_player_controllable() \
+			and _can_local_player_act():
 		_rebuild_unit_action_buttons(unit)
+		show_actions = _unit_actions_box.get_child_count() > 0
+	_unit_popup_separator.visible = show_actions
+	_unit_actions_box.visible = show_actions
 
 	_unit_popup.visible = true
 	_position_unit_popup()
@@ -1444,11 +1442,11 @@ func _update_unit_popup() -> void:
 func _position_unit_popup() -> void:
 	if _unit_popup == null or not _unit_popup.visible:
 		return
-	var unit: UnitBase = _get_popup_unit()
-	if unit == null or not _unit_nodes.has(unit.id):
+	if _selected_unit == null or not _unit_nodes.has(_selected_unit.id):
 		_unit_popup.visible = false
 		return
 
+	var unit: UnitBase = _selected_unit
 	var unit_node: Node2D = _unit_nodes[unit.id]
 	var anchor: Vector2 = get_global_transform().affine_inverse() * _actor_layer.to_global(unit_node.position)
 	var popup_size: Vector2 = _unit_popup.size.max(_unit_popup.get_combined_minimum_size())
@@ -1524,9 +1522,6 @@ func _build_unit_info_text(unit: UnitBase) -> String:
 	elif not _can_local_player_act():
 		lines.append("")
 		lines.append("Not your turn — viewing only.")
-	else:
-		lines.append("")
-		lines.append("Available this turn:")
 
 	return "\n".join(lines)
 
@@ -1652,6 +1647,34 @@ func _hex_under_mouse() -> Vector2i:
 	var q: float = (sqrt(3.0) / 3.0 * board_pos.x - 1.0 / 3.0 * board_pos.y) / HEX_SIZE
 	var r: float = (2.0 / 3.0 * board_pos.y) / HEX_SIZE
 	return HexCoords.round_axial(q, r)
+
+
+func _get_unit_under_mouse() -> UnitBase:
+	if _actor_layer == null:
+		return null
+	var mouse_pos: Vector2 = _actor_layer.get_local_mouse_position()
+	var closest: UnitBase = null
+	var closest_dist: float = INF
+	for unit in match_ctrl.units:
+		if not unit.is_alive or not match_ctrl.is_unit_placed(unit):
+			continue
+		if not _unit_nodes.has(unit.id):
+			continue
+		var node: Node2D = _unit_nodes[unit.id]
+		var dist: float = mouse_pos.distance_to(node.position)
+		var radius: float = _get_unit_hit_radius(unit)
+		if dist <= radius and dist < closest_dist:
+			closest = unit
+			closest_dist = dist
+	return closest
+
+
+func _get_unit_hit_radius(unit: UnitBase) -> float:
+	if unit.is_minion:
+		return UNIT_HIT_RADIUS_MINION
+	if unit.is_leader:
+		return UNIT_HIT_RADIUS_LEADER
+	return UNIT_HIT_RADIUS
 
 
 func _append_log(msg: String) -> void:
