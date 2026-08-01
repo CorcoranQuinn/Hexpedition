@@ -2,6 +2,7 @@ extends Control
 
 const ICON_SIZE := Vector2(72, 72)
 const PREVIEW_SIZE := Vector2(120, 120)
+const LOCKED_BORDER_WIDTH := 4
 
 @onready var local_preview_slot: Control = %LocalPreviewSlot
 @onready var opponent_preview_slot: Control = %OpponentPreviewSlot
@@ -207,33 +208,51 @@ func _set_preview_art(slot: Control, player_id: int, team_id: int) -> void:
 
 func _refresh_icon_highlights() -> void:
 	var control_slot: int = _get_control_slot()
-	var active_team_id: int = -1
-	if not _is_slot_locked(control_slot):
-		active_team_id = _teams[_local_hover_index].team_id
-	elif GameState.selected_team_ids[control_slot] >= 0:
-		active_team_id = GameState.selected_team_ids[control_slot]
+	var slot_locked: bool = _is_slot_locked(control_slot)
+	var hover_team_id: int = -1
+	var locked_team_id: int = -1
+
+	if slot_locked:
+		locked_team_id = GameState.selected_team_ids[control_slot]
+	else:
+		hover_team_id = _teams[_local_hover_index].team_id
 
 	for i in _icon_buttons.size():
 		var wrapper: PanelContainer = _icon_buttons[i].get_parent() as PanelContainer
 		if wrapper == null:
 			continue
-		var selected: bool = _teams[i].team_id == active_team_id
-		var slot_locked: bool = _is_slot_locked(control_slot)
+		var team: TeamDefinition = _teams[i]
+		var is_locked_pick: bool = slot_locked and team.team_id == locked_team_id
+		var is_hovered: bool = not slot_locked and team.team_id == hover_team_id
 		var style := StyleBoxFlat.new()
-		if slot_locked and not selected:
-			style.bg_color = Color(0.12, 0.13, 0.16)
-			style.border_color = Color(0.22, 0.23, 0.28)
-			style.set_border_width_all(1)
-			wrapper.modulate = Color(0.38, 0.38, 0.42, 1.0)
-		else:
-			style.bg_color = Color(0.18, 0.20, 0.26) if not selected else Color(0.28, 0.34, 0.48)
-			style.border_color = _teams[i].team_color if selected else Color(0.32, 0.34, 0.40)
-			style.set_border_width_all(2 if selected else 1)
-			wrapper.modulate = Color.WHITE
 		style.corner_radius_top_left = 8
 		style.corner_radius_top_right = 8
 		style.corner_radius_bottom_left = 8
 		style.corner_radius_bottom_right = 8
+
+		if is_locked_pick:
+			style.bg_color = Color(0.34, 0.42, 0.56)
+			style.border_color = team.team_color.lightened(0.25)
+			style.set_border_width_all(LOCKED_BORDER_WIDTH)
+			style.shadow_color = Color(team.team_color, 0.45)
+			style.shadow_size = 6
+			wrapper.modulate = Color.WHITE
+		elif slot_locked:
+			style.bg_color = Color(0.12, 0.13, 0.16)
+			style.border_color = Color(0.22, 0.23, 0.28)
+			style.set_border_width_all(1)
+			wrapper.modulate = Color(0.38, 0.38, 0.42, 1.0)
+		elif is_hovered:
+			style.bg_color = Color(0.28, 0.34, 0.48)
+			style.border_color = team.team_color
+			style.set_border_width_all(2)
+			wrapper.modulate = Color.WHITE
+		else:
+			style.bg_color = Color(0.18, 0.20, 0.26)
+			style.border_color = Color(0.32, 0.34, 0.40)
+			style.set_border_width_all(1)
+			wrapper.modulate = Color.WHITE
+
 		wrapper.add_theme_stylebox_override("panel", style)
 		_icon_buttons[i].disabled = slot_locked
 
