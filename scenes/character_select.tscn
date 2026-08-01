@@ -18,79 +18,94 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-theme_override_constants/margin_left = 24
-theme_override_constants/margin_top = 24
-theme_override_constants/margin_right = 24
-theme_override_constants/margin_bottom = 24
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
 
 [node name="Root" type="VBoxContainer" parent="Margin"]
 layout_mode = 2
-theme_override_constants/separation = 16
+theme_override_constants/separation = 10
 
 [node name="Header" type="Label" parent="Margin/Root"]
 layout_mode = 2
+theme_override_font_sizes/font_size = 22
 text = "Choose Your Leader"
-theme_override_font_sizes/font_size = 28
 
 [node name="PreviewRow" type="HBoxContainer" parent="Margin/Root"]
 layout_mode = 2
 size_flags_vertical = 3
-theme_override_constants/separation = 24
+theme_override_constants/separation = 16
 
 [node name="LocalPreviewPanel" type="VBoxContainer" parent="Margin/Root/PreviewRow"]
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_constants/separation = 8
+theme_override_constants/separation = 4
 
 [node name="LocalPreviewLabel" type="Label" parent="Margin/Root/PreviewRow/LocalPreviewPanel"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 13
 text = "You — choose a leader"
 horizontal_alignment = 1
 
 [node name="LocalPreviewSlot" type="Control" parent="Margin/Root/PreviewRow/LocalPreviewPanel"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(160, 160)
+custom_minimum_size = Vector2(120, 120)
 layout_mode = 2
 size_flags_horizontal = 4
 
 [node name="OpponentPreviewPanel" type="VBoxContainer" parent="Margin/Root/PreviewRow"]
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_constants/separation = 8
+theme_override_constants/separation = 4
 
 [node name="OpponentPreviewLabel" type="Label" parent="Margin/Root/PreviewRow/OpponentPreviewPanel"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 13
 text = "Opponent — choose a leader"
 horizontal_alignment = 1
 
 [node name="OpponentPreviewSlot" type="Control" parent="Margin/Root/PreviewRow/OpponentPreviewPanel"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(160, 160)
+custom_minimum_size = Vector2(120, 120)
 layout_mode = 2
 size_flags_horizontal = 4
 
 [node name="DetailsPanel" type="VBoxContainer" parent="Margin/Root/PreviewRow"]
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_constants/separation = 8
+size_flags_vertical = 3
+theme_override_constants/separation = 4
 
-[node name="TeamNameLabel" type="Label" parent="Margin/Root/PreviewRow/DetailsPanel"]
+[node name="DetailsScroll" type="ScrollContainer" parent="Margin/Root/PreviewRow/DetailsPanel"]
+layout_mode = 2
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="DetailsContent" type="VBoxContainer" parent="Margin/Root/PreviewRow/DetailsPanel/DetailsScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
+[node name="TeamNameLabel" type="Label" parent="Margin/Root/PreviewRow/DetailsPanel/DetailsScroll/DetailsContent"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_override_font_sizes/font_size = 24
+theme_override_font_sizes/font_size = 18
 text = "Team Name"
 
-[node name="TeamDescLabel" type="Label" parent="Margin/Root/PreviewRow/DetailsPanel"]
+[node name="TeamDescLabel" type="Label" parent="Margin/Root/PreviewRow/DetailsPanel/DetailsScroll/DetailsContent"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 12
 autowrap_mode = 2
 text = "Description"
 
-[node name="RosterLabel" type="Label" parent="Margin/Root/PreviewRow/DetailsPanel"]
+[node name="RosterLabel" type="Label" parent="Margin/Root/PreviewRow/DetailsPanel/DetailsScroll/DetailsContent"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 12
 autowrap_mode = 2
 text = "Roster"
 
@@ -98,13 +113,13 @@ text = "Roster"
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 4
-theme_override_constants/h_separation = 12
-theme_override_constants/v_separation = 12
+theme_override_constants/h_separation = 8
+theme_override_constants/v_separation = 8
 columns = 4
 
 [node name="ActionRow" type="HBoxContainer" parent="Margin/Root"]
 layout_mode = 2
-theme_override_constants/separation = 12
+theme_override_constants/separation = 8
 
 [node name="ConfirmButton" type="Button" parent="Margin/Root/ActionRow"]
 unique_name_in_owner = true
@@ -115,7 +130,7 @@ text = "Lock In"
 unique_name_in_owner = true
 layout_mode = 2
 visible = false
-text = "Unlock"
+text = "Unselect"
 
 [node name="RandomButton" type="Button" parent="Margin/Root/ActionRow"]
 unique_name_in_owner = true
@@ -125,11 +140,13 @@ text = "Random Leader"
 [node name="P1Status" type="Label" parent="Margin/Root"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 12
 text = "Player 1: not selected"
 
 [node name="P2Status" type="Label" parent="Margin/Root"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 12
 text = "Player 2: not selected"
 
 [node name="StartButton" type="Button" parent="Margin/Root"]

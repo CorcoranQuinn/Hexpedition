@@ -4,14 +4,12 @@ extends Control
 
 # --- Scene references (sidebar + board root from game_board.tscn) ---
 @onready var board_root: Node2D = %BoardRoot
+@onready var sidebar: VBoxContainer = %Sidebar
 @onready var turn_label: Label = %TurnLabel
 @onready var actions_label: Label = %ActionsLabel
 @onready var rp_label: Label = %RPLabel
 @onready var log_label: Label = %LogLabel
 @onready var move_button: Button = %MoveButton
-@onready var attack_button: Button = %AttackButton
-@onready var ability_button: Button = %AbilityButton
-@onready var tile_button: Button = %TileButton
 @onready var end_turn_button: Button = %EndTurnButton
 @onready var unit_info: Label = %UnitInfo
 
@@ -43,7 +41,9 @@ const UNIT_POPUP_WIDTH: float = 226.0
 const UNIT_POPUP_GAP: float = 26.0  ## Horizontal clearance from the unit marker.
 
 # --- Leader health panel layout (kept clear of the right-hand sidebar) ---
-const SIDEBAR_WIDTH: float = 320.0
+const SIDEBAR_WIDTH: float = 248.0
+const SIDEBAR_WIDTH_MIN: float = 210.0
+const SIDEBAR_WIDTH_MAX: float = 280.0
 const LEADER_PANEL_WIDTH: float = 236.0
 const LEADER_PANEL_MARGIN: float = 16.0
 
@@ -69,6 +69,10 @@ var _unit_actions_box: VBoxContainer  ## Quick-action buttons for the selected f
 var _unit_popup: PanelContainer  ## Floating inspector anchored to the selected unit.
 var _unit_popup_title: Label
 var _unit_popup_info: Label
+var _unit_popup_separator: Control
+var _unit_popup_close_button: Button
+var _turn_banner: PanelContainer
+var _turn_banner_label: Label
 
 # --- Camera state (see ISO_SQUASH notes above) ---
 var _camera_rig: Node2D  ## Pan + zoom container for the whole battlefield view.
@@ -78,6 +82,7 @@ var _dragging_camera: bool = false
 var _drag_start_mouse: Vector2 = Vector2.ZERO
 var _drag_start_pan: Vector2 = Vector2.ZERO
 var _camera_rotating: bool = false
+var _manual_camera: bool = false  ## User adjusted pan/zoom; skip auto-fit on resize.
 var _scroll_background: Control
 var _ground_layer: Node2D  ## Applies the isometric squash in screen space.
 var _ground_pivot: Node2D  ## Applies camera yaw; tiles and move paths live here.
@@ -122,9 +127,6 @@ func _ready() -> void:
 	unit_info.text = "Click a unit on the board to inspect it."
 
 	move_button.pressed.connect(_set_mode.bind("move"))
-	attack_button.pressed.connect(_set_mode.bind("attack"))
-	ability_button.pressed.connect(_set_mode.bind("ability"))
-	tile_button.pressed.connect(_set_mode.bind("tile"))
 	end_turn_button.pressed.connect(_on_end_turn)
 
 	match_ctrl.state_changed.connect(_refresh_ui)
@@ -145,12 +147,17 @@ func _ready() -> void:
 	# triggers a refresh that spawns unit visuals into the actor layer.
 	_setup_scroll_background()
 	_setup_board_layers()
-	_center_board_root()
+	if not resized.is_connected(_apply_viewport_layout):
+		resized.connect(_apply_viewport_layout)
+	if not get_viewport().size_changed.is_connected(_on_viewport_size_changed):
+		get_viewport().size_changed.connect(_on_viewport_size_changed)
+	_apply_viewport_layout()
 
 	var match_seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
 	match_ctrl.setup_match(match_seed)
 	_connect_turn_signals()
 	_build_board_visuals()
+	_apply_viewport_layout()
 	_path_overlay = Node2D.new()
 	_path_overlay.name = "MovePathOverlay"
 	_path_overlay.z_index = 4
@@ -161,6 +168,7 @@ func _ready() -> void:
 	_actor_layer.add_child(_battle_effects)
 	_setup_tile_tooltip()
 	_setup_unit_popup()
+	_setup_turn_banner()
 	_setup_camera_controls()
 	_setup_leader_panels()
 	_setup_placement_overlay()
@@ -170,14 +178,79 @@ func _ready() -> void:
 	await _run_placement_phase()
 	_cache_base_yaws()
 	_update_camera_for_viewer(_get_viewer_player_id(), false)
+	_apply_viewport_layout()
 	_refresh_ui()
 
 
-func _notification(what: int) -> void:
-	if what == NOTIFICATION_RESIZED:
-		_center_board_root()
-		if _scroll_background:
-			_scroll_background.queue_redraw()
+func _on_viewport_size_changed() -> void:
+	call_deferred("_apply_viewport_layout")
+
+
+func _apply_viewport_layout() -> void:
+	if not is_node_ready() or board_root == null:
+		return
+	_sync_sidebar_layout()
+	var board_area: Rect2 = _get_board_area_rect()
+	board_root.position = board_area.position + board_area.size * 0.5
+	if not _manual_camera:
+		_fit_board_zoom_to_view(board_area)
+	else:
+		_apply_camera_transform()
+	if _enemy_leader_box != null:
+		var sidebar_width: float = _get_sidebar_width()
+		_enemy_leader_box.offset_right = -(sidebar_width + LEADER_PANEL_MARGIN)
+		_enemy_leader_box.offset_left = _enemy_leader_box.offset_right - LEADER_PANEL_WIDTH
+	if _scroll_background:
+		_scroll_background.set_size(size)
+		_scroll_background.queue_redraw()
+	_position_unit_popup()
+
+
+func _sync_sidebar_layout() -> void:
+	if sidebar == null:
+		return
+	var sidebar_width: float = _get_sidebar_width()
+	sidebar.offset_left = -sidebar_width
+	sidebar.offset_top = 0.0
+	sidebar.offset_bottom = 0.0
+
+
+func _get_board_area_rect() -> Rect2:
+	var view_size: Vector2 = size
+	if view_size.x < 8.0 or view_size.y < 8.0:
+		view_size = get_viewport_rect().size
+	var sidebar_width: float = _get_sidebar_width()
+	var board_width: float = maxf(240.0, view_size.x - sidebar_width)
+	return Rect2(Vector2.ZERO, Vector2(board_width, view_size.y))
+
+
+func _get_sidebar_width() -> float:
+	if size.x > 1.0:
+		return clampf(size.x * 0.22, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+	return SIDEBAR_WIDTH
+
+
+func _estimate_board_pixel_radius() -> float:
+	if match_ctrl != null and match_ctrl.grid != null:
+		var max_dist: float = 0.0
+		for hex in match_ctrl.grid.get_all_hexes():
+			max_dist = maxf(max_dist, HexCoords.axial_to_pixel(hex, HEX_SIZE).length())
+		return max_dist + HEX_SIZE * 1.25
+	return float(MatchController.BOARD_RADIUS) * HEX_SIZE * 1.85
+
+
+func _fit_board_zoom_to_view(board_area: Rect2) -> void:
+	if _camera_rig == null:
+		return
+	var board_radius: float = _estimate_board_pixel_radius()
+	var squash: float = ISO_SQUASH if _iso_enabled else 1.0
+	var needed_w: float = board_radius * 2.2
+	var needed_h: float = board_radius * 2.2 * squash
+	if needed_w <= 0.0 or needed_h <= 0.0:
+		return
+	var fit_zoom: float = minf(board_area.size.x / needed_w, board_area.size.y / needed_h)
+	_camera_zoom = clampf(fit_zoom, ZOOM_MIN, ZOOM_MAX)
+	_apply_camera_transform()
 
 
 # --- Turn flow callbacks ---
@@ -203,14 +276,9 @@ func _setup_scroll_background() -> void:
 	_scroll_background = ScrollBackground.new()
 	_scroll_background.name = "ScrollBackground"
 	_scroll_background.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_scroll_background.set_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(_scroll_background)
 	move_child(_scroll_background, 0)
-
-
-func _center_board_root() -> void:
-	var viewport_size: Vector2 = get_viewport_rect().size
-	var board_width: float = maxf(320.0, viewport_size.x - SIDEBAR_WIDTH)
-	board_root.position = Vector2(board_width * 0.5, viewport_size.y * 0.5)
 
 
 # --- Board layers: a squashed, rotatable ground plane plus upright actors ---
@@ -611,34 +679,21 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 	var container := Node2D.new()
 	container.set_meta("unit_id", unit.id)
 
-	var highlight_radius: float = HEX_SIZE * 0.47
-	var outline_radius: float = HEX_SIZE * 0.42
 	var shadow_rx: float = HEX_SIZE * 0.42
 	var shadow_ry: float = shadow_rx * ISO_SQUASH
+	if unit.is_minion:
+		shadow_rx *= 0.65
+		shadow_ry *= 0.65
+	elif unit.is_leader:
+		shadow_rx *= 1.15
+		shadow_ry *= 1.15
 
-	# Squashed disc that grounds the unit marker on the tilted plane.
 	var shadow := Polygon2D.new()
 	shadow.name = "Shadow"
 	shadow.polygon = _make_ellipse_points(shadow_rx, shadow_ry)
 	shadow.color = Color(0.0, 0.0, 0.0, 0.28)
 	shadow.position = Vector2(0, HEX_SIZE * 0.24)
 	container.add_child(shadow)
-
-	var highlight := Polygon2D.new()
-	highlight.name = "Highlight"
-	highlight.polygon = _make_unit_points(highlight_radius)
-	highlight.color = Color(1.0, 1.0, 1.0, 0.22)
-	highlight.visible = false
-	container.add_child(highlight)
-
-	var outline := Line2D.new()
-	outline.name = "Outline"
-	outline.points = _make_unit_line_points(outline_radius)
-	outline.default_color = Color(1.0, 0.92, 0.35, 0.95)
-	outline.width = 3.0
-	outline.closed = true
-	outline.visible = false
-	container.add_child(outline)
 
 	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[unit.owner_id])
 	var oriented_body: OrientedVisual = UnitArtScript.build_oriented_board_unit(
@@ -648,16 +703,6 @@ func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
 		unit.is_minion,
 	)
 	oriented_body.name = "OrientedBody"
-	if unit.is_minion:
-		oriented_body.scale = Vector2(0.65, 0.65)
-		highlight.scale = Vector2(0.65, 0.65)
-		outline.scale = Vector2(0.65, 0.65)
-		shadow.scale = Vector2(0.65, 0.65)
-	elif unit.is_leader:
-		oriented_body.scale = Vector2(1.15, 1.15)
-		highlight.scale = Vector2(1.15, 1.15)
-		outline.scale = Vector2(1.15, 1.15)
-		shadow.scale = Vector2(1.15, 1.15)
 	if unit.is_ai_controlled:
 		oriented_body.modulate = Color(0.9, 0.95, 0.9)
 	container.add_child(oriented_body)
@@ -704,12 +749,12 @@ func _place_unit_node(node: Node2D, hex: Vector2i) -> void:
 func _update_unit_visual_states() -> void:
 	for unit_id in _unit_nodes:
 		var container: Node2D = _unit_nodes[unit_id]
-		var highlight: Polygon2D = container.get_node("Highlight") as Polygon2D
-		var outline: Line2D = container.get_node("Outline") as Line2D
-		if highlight:
-			highlight.visible = unit_id == _hovered_unit_id
-		if outline:
-			outline.visible = _selected_unit != null and _selected_unit.id == unit_id
+		var oriented: OrientedVisual = container.get_node_or_null("OrientedBody") as OrientedVisual
+		if oriented == null:
+			continue
+		oriented.set_hover_highlight(unit_id == _hovered_unit_id)
+		var selected: bool = _selected_unit != null and _selected_unit.id == unit_id
+		oriented.set_selection_outline(selected)
 
 
 # --- Sidebar sync: turn counters, tile colors, unit positions, action buttons ---
@@ -736,7 +781,7 @@ func _refresh_ui() -> void:
 	_update_unit_visual_states()
 	_update_move_button_label()
 	_update_action_buttons()
-	_update_unit_info_panel()
+	_update_unit_popup()
 	_refresh_leader_panels()
 
 
@@ -772,15 +817,9 @@ func _update_unit_positions() -> void:
 func _update_action_buttons() -> void:
 	var can_act: bool = _can_local_player_act()
 	move_button.disabled = not can_act or match_ctrl.placement_active
-	attack_button.disabled = not can_act or match_ctrl.placement_active
-	ability_button.disabled = not can_act or match_ctrl.placement_active
-	tile_button.disabled = not can_act or match_ctrl.placement_active
 	end_turn_button.disabled = not can_act or match_ctrl.placement_active
 	if _action_mode != "move" or _move_targets.is_empty():
 		move_button.text = "Move (1 AP, +1 RP)"
-	attack_button.text = "Attack (1 AP)"
-	ability_button.text = "Ability (1 AP + RP)"
-	tile_button.text = "Tile Interact (1 AP)"
 
 
 # --- Who may click actions (solo human, hot-seat, or online local player) ---
@@ -798,6 +837,7 @@ func _can_local_player_act() -> bool:
 # --- Solo AI: run opponent turn after a short delay ---
 func _on_turn_started(player_id: int) -> void:
 	_refresh_ui()
+	_play_turn_banner(player_id)
 	if GameState.is_solo() and player_id == GameState.get_ai_player_id():
 		_run_ai_turn_async()
 
@@ -975,7 +1015,6 @@ func _update_move_button_label() -> void:
 # --- Per-frame hover: unit highlight, tile tooltip, move path preview ---
 func _process(_delta: float) -> void:
 	_sync_camera_dependent_visuals()
-	_position_unit_popup()
 	if _intro_animating:
 		return
 	if _placement_active or match_ctrl.placement_active:
@@ -993,6 +1032,11 @@ func _process(_delta: float) -> void:
 	if hovered_id != _hovered_unit_id:
 		_hovered_unit_id = hovered_id
 		_update_unit_visual_states()
+		if _selected_unit == null:
+			_update_unit_popup()
+
+	if _unit_popup != null and _unit_popup.visible:
+		_position_unit_popup()
 
 	if match_ctrl.grid.has_tile(hex):
 		if hex != _hovered_hex:
@@ -1031,6 +1075,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					_dragging_camera = false
 				return
 	if event is InputEventMouseMotion and _dragging_camera:
+		_manual_camera = true
 		_camera_pan = _drag_start_pan + (event.position - _drag_start_mouse) / maxf(_camera_zoom, 0.05)
 		_apply_camera_transform()
 		return
@@ -1266,6 +1311,7 @@ func _setup_unit_popup() -> void:
 	close_button.custom_minimum_size = Vector2(24, 0)
 	close_button.pressed.connect(_deselect_unit)
 	header.add_child(close_button)
+	_unit_popup_close_button = close_button
 
 	_unit_popup_info = Label.new()
 	_unit_popup_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1273,7 +1319,8 @@ func _setup_unit_popup() -> void:
 	_unit_popup_info.add_theme_font_size_override("font_size", 11)
 	vbox.add_child(_unit_popup_info)
 
-	vbox.add_child(HSeparator.new())
+	_unit_popup_separator = HSeparator.new()
+	vbox.add_child(_unit_popup_separator)
 
 	_unit_actions_box = VBoxContainer.new()
 	_unit_actions_box.add_theme_constant_override("separation", 4)
@@ -1282,30 +1329,112 @@ func _setup_unit_popup() -> void:
 	add_child(_unit_popup)
 
 
+func _setup_turn_banner() -> void:
+	_turn_banner = PanelContainer.new()
+	_turn_banner.name = "TurnBanner"
+	_turn_banner.visible = false
+	_turn_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_turn_banner.z_index = 300
+	_turn_banner.set_anchors_preset(Control.PRESET_CENTER)
+	_turn_banner.offset_left = -220.0
+	_turn_banner.offset_right = 220.0
+	_turn_banner.offset_top = -36.0
+	_turn_banner.offset_bottom = 36.0
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.10, 0.14, 0.9)
+	style.border_color = Color(0.72, 0.78, 0.88, 0.55)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(14)
+	_turn_banner.add_theme_stylebox_override("panel", style)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 20)
+	margin.add_theme_constant_override("margin_right", 20)
+	margin.add_theme_constant_override("margin_top", 12)
+	margin.add_theme_constant_override("margin_bottom", 12)
+	_turn_banner.add_child(margin)
+
+	_turn_banner_label = Label.new()
+	_turn_banner_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_turn_banner_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_turn_banner_label.add_theme_font_size_override("font_size", 30)
+	margin.add_child(_turn_banner_label)
+	add_child(_turn_banner)
+
+
+func _play_turn_banner(player_id: int) -> void:
+	if _turn_banner == null or match_ctrl.placement_active or _placement_active:
+		return
+
+	_turn_banner_label.text = _format_turn_banner_text(player_id)
+	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[player_id])
+	_turn_banner_label.modulate = team.team_color.lightened(0.35)
+
+	_turn_banner.visible = true
+	_turn_banner.modulate = Color(1.0, 1.0, 1.0, 0.0)
+	_turn_banner.scale = Vector2(0.88, 0.88)
+
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(_turn_banner, "modulate:a", 1.0, 0.22).set_trans(Tween.TRANS_CUBIC)
+	tween.tween_property(_turn_banner, "scale", Vector2.ONE, 0.28).set_trans(Tween.TRANS_BACK)
+	tween.chain().tween_interval(1.15)
+	tween.tween_property(_turn_banner, "modulate:a", 0.0, 0.32).set_trans(Tween.TRANS_CUBIC)
+	tween.tween_callback(func() -> void: _turn_banner.visible = false)
+
+
+func _format_turn_banner_text(player_id: int) -> String:
+	if GameState.is_solo():
+		return "Your Turn" if player_id == 0 else "AI Turn"
+	if GameState.is_online():
+		if player_id == GameState.get_local_player_id():
+			return "Your Turn"
+		return "Opponent's Turn"
+	return "Player %d's Turn" % (player_id + 1)
+
+
 func _select_unit(unit: UnitBase) -> void:
 	_selected_unit = unit
-	_update_unit_info_panel()
+	_update_unit_popup()
 	_update_unit_visual_states()
 
 
 func _deselect_unit() -> void:
 	_selected_unit = null
 	_clear_unit_action_buttons()
-	if _unit_popup != null:
-		_unit_popup.visible = false
+	_update_unit_popup()
 	_update_unit_visual_states()
 
 
-func _update_unit_info_panel() -> void:
-	_clear_unit_action_buttons()
+func _get_popup_unit() -> UnitBase:
+	if _selected_unit != null and _selected_unit.is_alive:
+		return _selected_unit
+	if _hovered_unit_id.is_empty():
+		return null
+	return _find_unit_by_id(_hovered_unit_id)
+
+
+func _update_unit_popup() -> void:
 	if _unit_popup == null:
 		return
-	if _selected_unit == null or not _selected_unit.is_alive:
+	var unit: UnitBase = _get_popup_unit()
+	if unit == null or not unit.is_alive:
 		_unit_popup.visible = false
 		return
-	_unit_popup_title.text = _selected_unit.display_name
-	_unit_popup_info.text = _build_unit_info_text(_selected_unit)
-	_rebuild_unit_action_buttons(_selected_unit)
+
+	var is_selected: bool = _selected_unit != null and _selected_unit.id == unit.id
+	_unit_popup.mouse_filter = Control.MOUSE_FILTER_STOP if is_selected else Control.MOUSE_FILTER_IGNORE
+	_unit_popup_title.text = unit.display_name
+	_unit_popup_info.text = _build_unit_info_text(unit)
+	_unit_popup_separator.visible = is_selected
+	_unit_actions_box.visible = is_selected
+	_unit_popup_close_button.visible = is_selected
+
+	_clear_unit_action_buttons()
+	if is_selected:
+		_rebuild_unit_action_buttons(unit)
+
 	_unit_popup.visible = true
 	_position_unit_popup()
 
@@ -1313,20 +1442,36 @@ func _update_unit_info_panel() -> void:
 ## Keeps the popup pinned beside its unit, flipping sides and clamping so it
 ## never slides under the sidebar or off-screen.
 func _position_unit_popup() -> void:
-	if _unit_popup == null or not _unit_popup.visible or _selected_unit == null:
+	if _unit_popup == null or not _unit_popup.visible:
 		return
-	if not _unit_nodes.has(_selected_unit.id):
+	var unit: UnitBase = _get_popup_unit()
+	if unit == null or not _unit_nodes.has(unit.id):
 		_unit_popup.visible = false
 		return
 
-	var unit_node: Node2D = _unit_nodes[_selected_unit.id]
+	var unit_node: Node2D = _unit_nodes[unit.id]
 	var anchor: Vector2 = get_global_transform().affine_inverse() * _actor_layer.to_global(unit_node.position)
 	var popup_size: Vector2 = _unit_popup.size.max(_unit_popup.get_combined_minimum_size())
-	var right_limit: float = size.x - SIDEBAR_WIDTH - popup_size.x - 8.0
+	var right_limit: float = size.x - _get_sidebar_width() - popup_size.x - 8.0
+	var mouse_local: Vector2 = get_local_mouse_position()
 
-	var pos: Vector2 = Vector2(anchor.x + UNIT_POPUP_GAP, anchor.y - popup_size.y * 0.5)
-	if pos.x > right_limit:
-		pos.x = anchor.x - UNIT_POPUP_GAP - popup_size.x
+	var pos_right: Vector2 = Vector2(anchor.x + UNIT_POPUP_GAP, anchor.y - popup_size.y * 0.5)
+	var pos_left: Vector2 = Vector2(anchor.x - UNIT_POPUP_GAP - popup_size.x, anchor.y - popup_size.y * 0.5)
+	var use_right: bool
+
+	if _action_mode == "move":
+		var rect_right: Rect2 = Rect2(pos_right, popup_size)
+		var rect_left: Rect2 = Rect2(pos_left, popup_size)
+		if rect_right.has_point(mouse_local):
+			use_right = false
+		elif rect_left.has_point(mouse_local):
+			use_right = true
+		else:
+			use_right = pos_right.x <= right_limit
+	else:
+		use_right = pos_right.x <= right_limit
+
+	var pos: Vector2 = pos_right if use_right else pos_left
 	pos.x = clampf(pos.x, 8.0, maxf(8.0, right_limit))
 	pos.y = clampf(pos.y, 8.0, maxf(8.0, size.y - popup_size.y - 8.0))
 	_unit_popup.position = pos
@@ -1406,15 +1551,6 @@ func _rebuild_unit_action_buttons(unit: UnitBase) -> void:
 	var los_check := func(a, b): return match_ctrl.has_line_of_sight(a, b)
 	var rp: int = match_ctrl.resource_points[pid]
 	var can_spend: bool = match_ctrl.turn_manager.can_spend_action()
-
-	_add_unit_action_button(
-		"Move (1 AP, +1 RP)",
-		can_spend,
-		"Plan movement for this unit." if can_spend else "No actions remaining.",
-		func() -> void:
-			_set_mode("move")
-			_select_unit(unit),
-	)
 
 	var targets_in_range: int = _count_attack_targets(unit, los_check)
 	_add_unit_action_button(
@@ -1595,6 +1731,7 @@ func _apply_camera_transform() -> void:
 
 
 func _set_zoom(next_zoom: float) -> void:
+	_manual_camera = true
 	_camera_zoom = clampf(next_zoom, ZOOM_MIN, ZOOM_MAX)
 	_apply_camera_transform()
 
@@ -1646,8 +1783,10 @@ func _reset_camera_view() -> void:
 	if _match_ending or _move_animating:
 		return
 	_manual_yaw = 0.0
+	_manual_camera = false
 	_apply_camera_orientation(true)
 	_focus_camera_on_player(_get_viewer_player_id())
+	_apply_viewport_layout()
 
 
 func _toggle_isometric(enabled: bool) -> void:
@@ -1686,7 +1825,11 @@ func _sync_camera_dependent_visuals() -> void:
 		var container: Node2D = _unit_nodes[unit_id]
 		var oriented: Node = container.get_node_or_null("OrientedBody")
 		if oriented is OrientedVisual:
-			(oriented as OrientedVisual).set_orientation(orientation)
+			var visual := oriented as OrientedVisual
+			visual.set_orientation(orientation)
+			visual.set_hover_highlight(unit_id == _hovered_unit_id)
+			var selected: bool = _selected_unit != null and _selected_unit.id == unit_id
+			visual.set_selection_outline(selected)
 
 	for unit in match_ctrl.units:
 		if not _unit_nodes.has(unit.id) or _suppress_position_snap.has(unit.id):

@@ -16,51 +16,39 @@ unique_name_in_owner = true
 position = Vector2(420, 360)
 
 [node name="Sidebar" type="VBoxContainer" parent="."]
+unique_name_in_owner = true
 layout_mode = 1
 anchors_preset = 11
 anchor_left = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = -320.0
+offset_left = -248.0
 grow_horizontal = 0
 grow_vertical = 2
-theme_override_constants/separation = 8
+theme_override_constants/separation = 6
 
 [node name="TurnLabel" type="Label" parent="Sidebar"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_override_font_sizes/font_size = 20
+theme_override_font_sizes/font_size = 16
 text = "Turn 1"
 
 [node name="ActionsLabel" type="Label" parent="Sidebar"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 13
 text = "Actions: 3 / 3"
 
 [node name="RPLabel" type="Label" parent="Sidebar"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_override_font_sizes/font_size = 13
 text = "RP"
 
 [node name="MoveButton" type="Button" parent="Sidebar"]
 unique_name_in_owner = true
 layout_mode = 2
 text = "Move (+1 RP)"
-
-[node name="AttackButton" type="Button" parent="Sidebar"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Attack"
-
-[node name="AbilityButton" type="Button" parent="Sidebar"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Ability"
-
-[node name="TileButton" type="Button" parent="Sidebar"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Tile Interact"
 
 [node name="EndTurnButton" type="Button" parent="Sidebar"]
 unique_name_in_owner = true
@@ -71,11 +59,14 @@ text = "End Turn (skip remaining)"
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
+theme_override_font_sizes/font_size = 12
 autowrap_mode = 2
 text = "Select a unit."
 
 [node name="LogLabel" type="Label" parent="Sidebar"]
 unique_name_in_owner = true
 layout_mode = 2
+size_flags_vertical = 0
+theme_override_font_sizes/font_size = 11
 autowrap_mode = 2
 text = "Game log"

@@ -1,7 +1,7 @@
 extends Control
 
-const ICON_SIZE := Vector2(96, 96)
-const PREVIEW_SIZE := Vector2(160, 160)
+const ICON_SIZE := Vector2(72, 72)
+const PREVIEW_SIZE := Vector2(120, 120)
 
 @onready var local_preview_slot: Control = %LocalPreviewSlot
 @onready var opponent_preview_slot: Control = %OpponentPreviewSlot
@@ -50,14 +50,14 @@ func _ready() -> void:
 	if GameState.is_solo():
 		opponent_preview_label.text = "AI"
 		p2_status.text = "AI: random team on lock-in"
-		confirm_button.text = "Lock In & Start"
+		confirm_button.text = "Lock In"
 		confirm_button.tooltip_text = "Or double-click a leader icon."
 	elif GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
 		start_button.visible = true
 	elif GameState.match_mode == GameState.MatchMode.ONLINE_CLIENT:
 		start_button.visible = false
 
-	confirm_button.tooltip_text = "Or double-click a leader icon to lock in."
+	confirm_button.tooltip_text = "Double-click a leader icon to lock in without starting."
 
 
 func _resolve_local_slot() -> void:
@@ -118,7 +118,7 @@ func _set_local_hover(index: int) -> void:
 	_refresh_ui()
 
 
-func _on_icon_gui_input(index: int, event: InputEvent) -> void:
+func _on_icon_gui_input(event: InputEvent, index: int) -> void:
 	if _is_slot_locked(_get_control_slot()):
 		return
 	if event is InputEventMouseButton \
@@ -199,7 +199,7 @@ func _set_preview_art(slot: Control, player_id: int, team_id: int) -> void:
 
 	var team: TeamDefinition = TeamRegistry.get_team(team_id)
 	var art := _make_icon_art(team)
-	art.scale = Vector2(1.35, 1.35)
+	art.scale = Vector2(1.15, 1.15)
 	art.position = PREVIEW_SIZE * 0.5 + Vector2(0, 8)
 	slot.add_child(art)
 	_preview_nodes[player_id] = art
@@ -218,16 +218,24 @@ func _refresh_icon_highlights() -> void:
 		if wrapper == null:
 			continue
 		var selected: bool = _teams[i].team_id == active_team_id
+		var slot_locked: bool = _is_slot_locked(control_slot)
 		var style := StyleBoxFlat.new()
-		style.bg_color = Color(0.18, 0.20, 0.26) if not selected else Color(0.28, 0.34, 0.48)
-		style.border_color = _teams[i].team_color if selected else Color(0.32, 0.34, 0.40)
-		style.set_border_width_all(2 if selected else 1)
+		if slot_locked and not selected:
+			style.bg_color = Color(0.12, 0.13, 0.16)
+			style.border_color = Color(0.22, 0.23, 0.28)
+			style.set_border_width_all(1)
+			wrapper.modulate = Color(0.38, 0.38, 0.42, 1.0)
+		else:
+			style.bg_color = Color(0.18, 0.20, 0.26) if not selected else Color(0.28, 0.34, 0.48)
+			style.border_color = _teams[i].team_color if selected else Color(0.32, 0.34, 0.40)
+			style.set_border_width_all(2 if selected else 1)
+			wrapper.modulate = Color.WHITE
 		style.corner_radius_top_left = 8
 		style.corner_radius_top_right = 8
 		style.corner_radius_bottom_left = 8
 		style.corner_radius_bottom_right = 8
 		wrapper.add_theme_stylebox_override("panel", style)
-		_icon_buttons[i].disabled = _is_slot_locked(control_slot)
+		_icon_buttons[i].disabled = slot_locked
 
 
 func _refresh_action_buttons() -> void:
@@ -241,7 +249,7 @@ func _refresh_action_buttons() -> void:
 	start_button.disabled = not all_locked
 
 	if GameState.is_solo():
-		start_button.visible = false
+		start_button.visible = all_locked
 	elif GameState.match_mode == GameState.MatchMode.ONLINE_CLIENT:
 		start_button.visible = false
 	else:
@@ -286,7 +294,6 @@ func _lock_current_selection() -> void:
 		var ai_team_id: int = TeamRegistry.pick_random_team_id(team.team_id)
 		GameState.lock_team(1, ai_team_id)
 		_refresh_ui()
-		NetworkManager.request_start_if_ready()
 		return
 
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
@@ -306,6 +313,11 @@ func _lock_current_selection() -> void:
 func _on_unlock_pressed() -> void:
 	var slot: int = _get_control_slot()
 	if not _is_slot_locked(slot):
+		return
+	if GameState.is_solo():
+		GameState.unlock_team(0)
+		GameState.unlock_team(1)
+		_refresh_ui()
 		return
 	NetworkManager.submit_team_unlock(slot)
 	if GameState.match_mode == GameState.MatchMode.LOCAL:

@@ -79,6 +79,24 @@ static func _build_board_figure(
 	body.color = team_color
 	root.add_child(body)
 
+	var ring_radius: float = radius * 1.12
+	var hover_ring := Polygon2D.new()
+	hover_ring.name = "HoverRing"
+	hover_ring.polygon = _triangle_points(ring_radius)
+	hover_ring.color = Color(1.0, 1.0, 1.0, 0.24)
+	hover_ring.visible = false
+	root.add_child(hover_ring)
+	root.move_child(hover_ring, 0)
+
+	var select_ring := Line2D.new()
+	select_ring.name = "SelectRing"
+	select_ring.points = _triangle_line_points(ring_radius)
+	select_ring.default_color = Color(1.0, 0.92, 0.35, 0.95)
+	select_ring.width = 3.0
+	select_ring.closed = true
+	select_ring.visible = false
+	root.add_child(select_ring)
+
 	var accent := Node2D.new()
 	root.add_child(accent)
 	match type_id:
@@ -148,6 +166,15 @@ static func _triangle_points(radius: float) -> PackedVector2Array:
 		Vector2(0, -radius),
 		Vector2(radius * 0.86, radius * 0.72),
 		Vector2(-radius * 0.86, radius * 0.72),
+	])
+
+
+static func _triangle_line_points(radius: float) -> PackedVector2Array:
+	return PackedVector2Array([
+		Vector2(0, -radius),
+		Vector2(radius * 0.86, radius * 0.72),
+		Vector2(-radius * 0.86, radius * 0.72),
+		Vector2(0, -radius),
 	])
 
 
