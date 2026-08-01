@@ -3,18 +3,22 @@ extends Control
 const ICON_SIZE := Vector2(72, 72)
 const PREVIEW_SIZE := Vector2(120, 120)
 const LOCKED_BORDER_WIDTH := 4
+const LOCK_ANIM_SCALE := 1.14
+const LOCK_ANIM_IN := 0.14
+const LOCK_ANIM_OUT := 0.22
 
 @onready var local_preview_slot: Control = %LocalPreviewSlot
 @onready var opponent_preview_slot: Control = %OpponentPreviewSlot
 @onready var local_preview_label: Label = %LocalPreviewLabel
 @onready var opponent_preview_label: Label = %OpponentPreviewLabel
+@onready var local_lock_status: Label = %LocalLockStatus
+@onready var opponent_lock_status: Label = %OpponentLockStatus
 @onready var team_icon_grid: GridContainer = %TeamIconGrid
 @onready var team_name_label: Label = %TeamNameLabel
 @onready var team_desc_label: Label = %TeamDescLabel
 @onready var roster_label: Label = %RosterLabel
 @onready var p1_status: Label = %P1Status
 @onready var p2_status: Label = %P2Status
-@onready var confirm_button: Button = %ConfirmButton
 @onready var unlock_button: Button = %UnlockButton
 @onready var random_button: Button = %RandomButton
 @onready var start_button: Button = %StartButton
@@ -26,6 +30,7 @@ var _active_slot: int = 0
 var _local_hover_index: int = 0
 var _icon_buttons: Array[Button] = []
 var _preview_nodes: Dictionary = {}  # slot -> Node2D
+var _was_locked: Array[bool] = [false, false]
 
 
 func _ready() -> void:
@@ -34,7 +39,6 @@ func _ready() -> void:
 	_resolve_local_slot()
 	_active_slot = _local_slot if GameState.match_mode != GameState.MatchMode.LOCAL else 0
 
-	confirm_button.pressed.connect(_on_confirm_pressed)
 	unlock_button.pressed.connect(_on_unlock_pressed)
 	random_button.pressed.connect(_on_random_pressed)
 	start_button.pressed.connect(_on_start_pressed)
@@ -51,10 +55,6 @@ func _ready() -> void:
 	if GameState.is_solo():
 		opponent_preview_label.text = "AI"
 		p2_status.text = "AI: random team on lock-in"
-		confirm_button.text = "Lock In"
-		confirm_button.tooltip_text = "Or double-click a leader icon."
-	else:
-		confirm_button.tooltip_text = "Double-click a leader icon to lock in without starting."
 
 
 func _can_local_player_start() -> bool:
@@ -168,24 +168,84 @@ func _format_roster_unit_entry(type_id: String, team_id: int) -> String:
 
 func _refresh_ui() -> void:
 	var display_slot: int = _active_slot if GameState.match_mode == GameState.MatchMode.LOCAL else _local_slot
-	_refresh_preview(local_preview_slot, display_slot, local_preview_label)
+	_refresh_preview(local_preview_slot, local_preview_label, local_lock_status, display_slot)
 	var opponent_slot: int = 1 - display_slot
-	_refresh_preview(opponent_preview_slot, opponent_slot, opponent_preview_label)
+	_refresh_preview(opponent_preview_slot, opponent_preview_label, opponent_lock_status, opponent_slot)
+	_check_lock_animations(display_slot)
+	_check_lock_animations(opponent_slot)
 	_refresh_player_status()
 	_refresh_icon_highlights()
 	_refresh_action_buttons()
 
 
-func _refresh_preview(slot: Control, player_id: int, caption: Label) -> void:
+func _refresh_preview(
+		slot: Control,
+		caption: Label,
+		lock_status: Label,
+		player_id: int,
+) -> void:
 	var player_name: String = NetworkManager.get_display_name(player_id)
 	var team_id: int = GameState.get_preview_team_id(player_id)
-	var status_suffix: String = " (locked)" if GameState.team_locked[player_id] else ""
 	if team_id < 0:
-		caption.text = "%s — choose a leader%s" % [player_name, status_suffix]
+		caption.text = "%s — choose a leader" % player_name
 	else:
 		var team: TeamDefinition = TeamRegistry.get_team(team_id)
-		caption.text = "%s — %s%s" % [player_name, team.team_name, status_suffix]
+		caption.text = "%s — %s" % [player_name, team.team_name]
+	_update_lock_status_label(lock_status, player_id, team_id)
 	_set_preview_art(slot, player_id, team_id)
+
+
+func _update_lock_status_label(lock_status: Label, player_id: int, team_id: int) -> void:
+	if GameState.team_locked[player_id]:
+		lock_status.text = "Locked in"
+		if team_id >= 0:
+			lock_status.modulate = TeamRegistry.get_team(team_id).team_color.lightened(0.15)
+		else:
+			lock_status.modulate = Color(0.55, 0.95, 0.65)
+	else:
+		lock_status.text = "Not locked in"
+		lock_status.modulate = Color(0.62, 0.64, 0.70)
+
+
+func _check_lock_animations(player_id: int) -> void:
+	var now_locked: bool = GameState.team_locked[player_id]
+	if now_locked and not _was_locked[player_id]:
+		_play_lock_animation(player_id)
+	_was_locked[player_id] = now_locked
+
+
+func _play_lock_animation(player_id: int) -> void:
+	var preview_slot: Control = _get_preview_slot_for_player(player_id)
+	preview_slot.scale = Vector2.ONE
+	preview_slot.pivot_offset = PREVIEW_SIZE * 0.5
+	var tween := create_tween()
+	tween.set_parallel(false)
+	tween.tween_property(preview_slot, "scale", Vector2.ONE * LOCK_ANIM_SCALE, LOCK_ANIM_IN) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tween.tween_property(preview_slot, "scale", Vector2.ONE, LOCK_ANIM_OUT) \
+		.set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+
+	if player_id != _get_control_slot():
+		return
+	for i in _icon_buttons.size():
+		if GameState.selected_team_ids[player_id] == _teams[i].team_id:
+			var wrapper: PanelContainer = _icon_buttons[i].get_parent() as PanelContainer
+			if wrapper != null:
+				wrapper.scale = Vector2.ONE
+				wrapper.pivot_offset = ICON_SIZE * 0.5
+				var icon_tween := create_tween()
+				icon_tween.tween_property(wrapper, "scale", Vector2.ONE * LOCK_ANIM_SCALE, LOCK_ANIM_IN) \
+					.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+				icon_tween.tween_property(wrapper, "scale", Vector2.ONE, LOCK_ANIM_OUT) \
+					.set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+			break
+
+
+func _get_preview_slot_for_player(player_id: int) -> Control:
+	var display_slot: int = _active_slot if GameState.match_mode == GameState.MatchMode.LOCAL else _local_slot
+	if player_id == display_slot:
+		return local_preview_slot
+	return opponent_preview_slot
 
 
 func _set_preview_art(slot: Control, player_id: int, team_id: int) -> void:
@@ -262,7 +322,6 @@ func _refresh_action_buttons() -> void:
 	var slot_locked: bool = _is_slot_locked(control_slot)
 	var all_locked: bool = GameState.all_teams_locked()
 
-	confirm_button.disabled = slot_locked or _teams.is_empty()
 	unlock_button.disabled = not slot_locked
 	random_button.disabled = slot_locked
 	start_button.disabled = not all_locked or not _can_local_player_start()
@@ -290,10 +349,6 @@ func _on_random_pressed() -> void:
 		return
 	var random_idx: int = randi() % _teams.size()
 	_set_local_hover(random_idx)
-
-
-func _on_confirm_pressed() -> void:
-	_lock_current_selection()
 
 
 func _lock_current_selection() -> void:

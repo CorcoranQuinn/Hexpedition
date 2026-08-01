@@ -154,10 +154,10 @@ func _is_in_placement_zone(hex: Vector2i, player_id: int) -> bool:
 		return false
 	var q: int = hex.x
 	if player_id == 0:
-		var back_q: int = -(BOARD_RADIUS - 1)
+		var back_q: int = -BOARD_RADIUS
 		var front_q: int = back_q + (PLACEMENT_BACK_ROWS - 1)
 		return q >= back_q and q <= front_q
-	var back_q: int = BOARD_RADIUS - 1
+	var back_q: int = BOARD_RADIUS
 	var front_q: int = back_q - (PLACEMENT_BACK_ROWS - 1)
 	return q <= back_q and q >= front_q
 

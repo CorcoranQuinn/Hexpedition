@@ -49,6 +49,13 @@ theme_override_font_sizes/font_size = 13
 text = "You — choose a leader"
 horizontal_alignment = 1
 
+[node name="LocalLockStatus" type="Label" parent="Margin/Root/PreviewRow/LocalPreviewPanel"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = "Not locked in"
+horizontal_alignment = 1
+
 [node name="LocalPreviewSlot" type="Control" parent="Margin/Root/PreviewRow/LocalPreviewPanel"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(120, 120)
@@ -65,6 +72,13 @@ unique_name_in_owner = true
 layout_mode = 2
 theme_override_font_sizes/font_size = 13
 text = "Opponent — choose a leader"
+horizontal_alignment = 1
+
+[node name="OpponentLockStatus" type="Label" parent="Margin/Root/PreviewRow/OpponentPreviewPanel"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = "Not locked in"
 horizontal_alignment = 1
 
 [node name="OpponentPreviewSlot" type="Control" parent="Margin/Root/PreviewRow/OpponentPreviewPanel"]
@@ -120,11 +134,6 @@ columns = 4
 [node name="ActionRow" type="HBoxContainer" parent="Margin/Root"]
 layout_mode = 2
 theme_override_constants/separation = 8
-
-[node name="ConfirmButton" type="Button" parent="Margin/Root/ActionRow"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Lock In"
 
 [node name="UnlockButton" type="Button" parent="Margin/Root/ActionRow"]
 unique_name_in_owner = true
