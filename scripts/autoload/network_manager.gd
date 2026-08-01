@@ -13,6 +13,9 @@ signal rematch_requested(same_teams: bool)
 signal action_applied(action_type: String, payload: Dictionary, result: Dictionary)
 signal placement_submit_received(player_id: int, unit_id: String, hex: Vector2i)
 signal placement_snapshot_applied(snapshot: Dictionary)
+signal saved_match_offered(summary: Dictionary)
+signal saved_match_resume_started(save_data: Dictionary)
+signal saved_match_discarded
 
 const DEFAULT_PORT: int = 7777
 
@@ -182,6 +185,39 @@ func rpc_notify_rematch(same_teams: bool) -> void:
 	rematch_requested.emit(same_teams)
 
 
+@rpc("authority", "call_local", "reliable")
+func rpc_offer_saved_match(summary: Dictionary) -> void:
+	GameState.saved_match_summary = summary
+	saved_match_offered.emit(summary)
+
+
+@rpc("authority", "call_local", "reliable")
+func rpc_start_saved_match(save_data: Dictionary) -> void:
+	GameState.pending_saved_match_data = save_data
+	GameState.pending_saved_match_resume = true
+	for player_id in 2:
+		var team_ids: Array = save_data.get("selected_team_ids", [-1, -1])
+		if player_id < team_ids.size():
+			GameState.lock_team(player_id, int(team_ids[player_id]))
+	GameState.match_seed = int(save_data.get("match_seed", -1))
+	saved_match_resume_started.emit(save_data)
+	get_tree().change_scene_to_file("res://scenes/game_board.tscn")
+
+
+@rpc("authority", "call_local", "reliable")
+func rpc_discard_saved_match() -> void:
+	GameState.saved_match_summary = {}
+	SaveGameManager.delete_save()
+	saved_match_discarded.emit()
+
+
+@rpc("any_peer", "call_local", "reliable")
+func rpc_request_discard_saved_match() -> void:
+	if not _mp().is_server():
+		return
+	discard_saved_match()
+
+
 # --- Local wrappers: route to RPC or emit directly for offline play ---
 
 func submit_action(action_type: String, payload: Dictionary) -> void:
@@ -249,6 +285,34 @@ func request_rematch(same_teams: bool) -> void:
 		rpc_request_rematch.rpc_id(1, same_teams)
 
 
+func offer_saved_match_to_lobby() -> void:
+	if not _mp().is_server() or not SaveGameManager.has_save():
+		return
+	var summary: Dictionary = SaveGameManager.get_save_summary()
+	GameState.saved_match_summary = summary
+	rpc_offer_saved_match.rpc(summary)
+
+
+func accept_saved_match() -> void:
+	if not _mp().is_server() or not SaveGameManager.has_save():
+		return
+	var save_data: Dictionary = SaveGameManager.load_save()
+	if save_data.is_empty():
+		return
+	rpc_start_saved_match.rpc(save_data)
+
+
+func discard_saved_match() -> void:
+	if not _mp().is_server():
+		rpc_request_discard_saved_match.rpc_id(1)
+		return
+	rpc_discard_saved_match.rpc()
+
+
+func request_discard_saved_match() -> void:
+	discard_saved_match()
+
+
 # --- Internal peer cleanup and connection callbacks ---
 
 func _cleanup_peer() -> void:
@@ -290,6 +354,8 @@ func _is_authority_for_selection(player_id: int) -> bool:
 
 func _on_peer_connected(id: int) -> void:
 	peer_connected.emit(id)
+	if _mp().is_server() and SaveGameManager.has_save():
+		offer_saved_match_to_lobby()
 
 
 func _on_peer_disconnected(id: int) -> void:

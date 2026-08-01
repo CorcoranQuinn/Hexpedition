@@ -23,6 +23,7 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 
 GameState="*res://scripts/autoload/game_state.gd"
 NetworkManager="*res://scripts/autoload/network_manager.gd"
+SaveGameManager="*res://scripts/autoload/save_game_manager.gd"
 
 [display]
 

@@ -31,6 +31,9 @@ var _local_hover_index: int = 0
 var _icon_buttons: Array[Button] = []
 var _preview_nodes: Dictionary = {}  # slot -> Node2D
 var _was_locked: Array[bool] = [false, false]
+var _save_resume_overlay: PanelContainer
+var _save_resume_details: Label
+var _save_resume_button: Button
 
 
 func _ready() -> void:
@@ -48,6 +51,11 @@ func _ready() -> void:
 	NetworkManager.lock_updated.connect(_on_lock_updated)
 	NetworkManager.match_start_requested.connect(_on_match_start)
 	NetworkManager.peer_connected.connect(_on_peer_connected)
+	NetworkManager.saved_match_offered.connect(_on_saved_match_offered)
+	NetworkManager.saved_match_discarded.connect(_on_saved_match_discarded)
+
+	_build_save_resume_overlay()
+	_set_save_resume_visible(false)
 
 	_set_local_hover(0)
 	_refresh_ui()
@@ -55,6 +63,13 @@ func _ready() -> void:
 	if GameState.is_solo():
 		opponent_preview_label.text = "AI"
 		p2_status.text = "AI: random team on lock-in"
+
+	if GameState.is_online() and not GameState.saved_match_summary.is_empty():
+		_show_saved_match_offer(GameState.saved_match_summary)
+	elif GameState.match_mode == GameState.MatchMode.ONLINE_HOST \
+			and NetworkManager.has_remote_peer() \
+			and SaveGameManager.has_save():
+		NetworkManager.offer_saved_match_to_lobby()
 
 
 func _can_local_player_start() -> bool:
@@ -418,6 +433,124 @@ func _on_match_start() -> void:
 
 func _on_peer_connected(_id: int) -> void:
 	p2_status.text = "Client connected — waiting for selection..."
+
+
+func _build_save_resume_overlay() -> void:
+	_save_resume_overlay = PanelContainer.new()
+	_save_resume_overlay.name = "SaveResumeOverlay"
+	_save_resume_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_save_resume_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_save_resume_overlay.z_index = 400
+
+	var dim := ColorRect.new()
+	dim.color = Color(0.02, 0.03, 0.05, 0.72)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_save_resume_overlay.add_child(dim)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_save_resume_overlay.add_child(center)
+
+	var panel := PanelContainer.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.09, 0.12, 0.98)
+	style.border_color = Color(0.55, 0.62, 0.75, 0.85)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(8)
+	style.set_content_margin_all(16)
+	panel.add_theme_stylebox_override("panel", style)
+	panel.custom_minimum_size = Vector2(460, 0)
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 12)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "Saved Match Found"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 20)
+	vbox.add_child(title)
+
+	_save_resume_details = Label.new()
+	_save_resume_details.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_save_resume_details.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(_save_resume_details)
+
+	var buttons := HBoxContainer.new()
+	buttons.alignment = BoxContainer.ALIGNMENT_CENTER
+	buttons.add_theme_constant_override("separation", 10)
+	vbox.add_child(buttons)
+
+	_save_resume_button = Button.new()
+	_save_resume_button.text = "Resume Saved Match"
+	_save_resume_button.pressed.connect(_on_save_resume_pressed)
+	buttons.add_child(_save_resume_button)
+
+	var fresh_button := Button.new()
+	fresh_button.text = "Start Fresh"
+	fresh_button.pressed.connect(_on_save_fresh_pressed)
+	buttons.add_child(fresh_button)
+
+	add_child(_save_resume_overlay)
+
+
+func _set_save_resume_visible(visible: bool) -> void:
+	if _save_resume_overlay != null:
+		_save_resume_overlay.visible = visible
+
+
+func _show_saved_match_offer(summary: Dictionary) -> void:
+	if summary.is_empty():
+		_set_save_resume_visible(false)
+		return
+	_save_resume_details.text = _format_saved_match_summary(summary)
+	var is_host: bool = GameState.match_mode == GameState.MatchMode.ONLINE_HOST
+	_save_resume_button.visible = is_host
+	_save_resume_button.disabled = not NetworkManager.has_remote_peer()
+	_set_save_resume_visible(true)
+
+
+func _format_saved_match_summary(summary: Dictionary) -> String:
+	var lines: PackedStringArray = PackedStringArray()
+	var phase: String = "deployment phase" if summary.get("in_placement", false) else "turn %d" % int(summary.get("turn_number", 1))
+	lines.append("Saved %s — %s's turn." % [phase, summary.get("current_player_name", "Player")])
+	lines.append("")
+	for player_data_variant in summary.get("players", []):
+		if typeof(player_data_variant) != TYPE_DICTIONARY:
+			continue
+		var player_data: Dictionary = player_data_variant
+		lines.append(
+			"%s: %s — AP %s, RP %d / %d" % [
+				player_data.get("display_name", "Player"),
+				player_data.get("team_name", "Unknown"),
+				player_data.get("ap_text", "—"),
+				int(player_data.get("rp", 0)),
+				int(player_data.get("rp_max", 0)),
+			],
+		)
+	lines.append("")
+	lines.append("Resume to continue, or start fresh to discard the save.")
+	return "\n".join(lines)
+
+
+func _on_saved_match_offered(summary: Dictionary) -> void:
+	_show_saved_match_offer(summary)
+
+
+func _on_saved_match_discarded() -> void:
+	GameState.saved_match_summary = {}
+	_set_save_resume_visible(false)
+
+
+func _on_save_resume_pressed() -> void:
+	if GameState.match_mode != GameState.MatchMode.ONLINE_HOST:
+		return
+	NetworkManager.accept_saved_match()
+
+
+func _on_save_fresh_pressed() -> void:
+	NetworkManager.request_discard_saved_match()
 
 
 func _on_back_pressed() -> void:

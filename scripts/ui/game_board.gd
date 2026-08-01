@@ -11,6 +11,7 @@ extends Control
 @onready var log_label: Label = %LogLabel
 @onready var move_button: Button = %MoveButton
 @onready var end_turn_button: Button = %EndTurnButton
+@onready var leave_game_button: Button = %LeaveGameButton
 @onready var unit_info: Label = %UnitInfo
 
 # --- Constants & preloads ---
@@ -104,6 +105,8 @@ var _synced_orientation: int = -1
 var _player_leader_box: VBoxContainer
 var _enemy_leader_box: VBoxContainer
 var _leader_rows: Dictionary = {}  ## unit_id -> { panel, name, bar, fill, color }
+var _player_panel_stats: Dictionary = {}  ## player_id -> Label (AP/RP under leader panel)
+var _leave_game_dialog: AcceptDialog
 
 # --- Match intro + pre-game unit deployment ---
 var _intro_animating: bool = false
@@ -132,6 +135,7 @@ func _ready() -> void:
 
 	move_button.pressed.connect(_set_mode.bind("move"))
 	end_turn_button.pressed.connect(_on_end_turn)
+	leave_game_button.pressed.connect(_on_leave_game_pressed)
 
 	match_ctrl.state_changed.connect(_refresh_ui)
 	match_ctrl.action_log.connect(_append_log)
@@ -147,7 +151,13 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/character_select.tscn")
 		return
 
-	# Layers must exist before setup_match, whose state_changed signal already
+	var resuming_saved_match: bool = GameState.pending_saved_match_resume
+	var saved_match_data: Dictionary = GameState.pending_saved_match_data
+	if resuming_saved_match:
+		GameState.pending_saved_match_resume = false
+		GameState.pending_saved_match_data = {}
+
+	# Layers must exist before setup_match / restore, whose state_changed signal already
 	# triggers a refresh that spawns unit visuals into the actor layer.
 	_setup_scroll_background()
 	_setup_board_layers()
@@ -156,6 +166,10 @@ func _ready() -> void:
 	if not get_viewport().size_changed.is_connected(_on_viewport_size_changed):
 		get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_apply_viewport_layout()
+
+	if resuming_saved_match:
+		await _bootstrap_saved_match(saved_match_data)
+		return
 
 	var match_seed: int = GameState.match_seed if GameState.match_seed >= 0 else -1
 	match_ctrl.setup_match(match_seed)
@@ -175,6 +189,9 @@ func _ready() -> void:
 	_setup_turn_banner()
 	_setup_camera_controls()
 	_setup_leader_panels()
+	_setup_leave_game_dialog()
+	actions_label.visible = false
+	rp_label.visible = false
 	_setup_placement_overlay()
 	_update_action_buttons()
 	set_process(true)
@@ -184,6 +201,44 @@ func _ready() -> void:
 	_update_camera_for_viewer(_get_viewer_player_id(), false)
 	_apply_viewport_layout()
 	_refresh_ui()
+
+
+func _bootstrap_saved_match(save_data: Dictionary) -> void:
+	GameState.match_seed = int(save_data.get("match_seed", GameState.match_seed))
+	for player_id in 2:
+		var team_ids: Array = save_data.get("selected_team_ids", [-1, -1])
+		if player_id < team_ids.size() and int(team_ids[player_id]) >= 0:
+			GameState.lock_team(player_id, int(team_ids[player_id]))
+	match_ctrl.restore_from_snapshot(save_data.get("match", {}))
+	_connect_turn_signals()
+	_build_board_visuals()
+	_apply_viewport_layout()
+	_path_overlay = Node2D.new()
+	_path_overlay.name = "MovePathOverlay"
+	_path_overlay.z_index = 4
+	_ground_pivot.add_child(_path_overlay)
+	_battle_effects = BattleEffectsScript.new()
+	_battle_effects.setup(HEX_SIZE)
+	_battle_effects.z_index = 60
+	_actor_layer.add_child(_battle_effects)
+	_setup_tile_tooltip()
+	_setup_unit_popup()
+	_setup_turn_banner()
+	_setup_camera_controls()
+	_setup_leader_panels()
+	_setup_leave_game_dialog()
+	actions_label.visible = false
+	rp_label.visible = false
+	_setup_placement_overlay()
+	_update_action_buttons()
+	set_process(true)
+	if match_ctrl.placement_active:
+		await _run_placement_phase()
+	_cache_base_yaws()
+	_update_camera_for_viewer(_get_viewer_player_id(), false)
+	_apply_viewport_layout()
+	_refresh_ui()
+	log_label.text = "Saved match resumed."
 
 
 func _on_viewport_size_changed() -> void:
@@ -775,13 +830,6 @@ func _refresh_ui() -> void:
 		turn_label.text = "Turn %d — %s" % [match_ctrl.turn_manager.turn_number, who]
 	else:
 		turn_label.text = "Turn %d — Player %d" % [match_ctrl.turn_manager.turn_number, pid + 1]
-	actions_label.text = "Actions: %d / %d" % [
-		match_ctrl.turn_manager.actions_remaining, TurnManager.ACTIONS_PER_TURN
-	]
-	rp_label.text = "RP — P1: %d/%d  P2: %d/%d" % [
-		match_ctrl.resource_points[0], match_ctrl.get_max_resource(0),
-		match_ctrl.resource_points[1], match_ctrl.get_max_resource(1),
-	]
 	_update_board_colors()
 	_update_unit_positions()
 	_update_unit_visual_states()
@@ -825,7 +873,7 @@ func _update_action_buttons() -> void:
 	move_button.disabled = not can_act or match_ctrl.placement_active
 	end_turn_button.disabled = not can_act or match_ctrl.placement_active
 	if _action_mode != "move" or _move_targets.is_empty():
-		move_button.text = "Move (1 AP, +1 RP)"
+		move_button.text = "Move (+1 RP)"
 
 
 # --- Who may click actions (solo human, hot-seat, or online local player) ---
@@ -1015,7 +1063,7 @@ func _update_move_button_label() -> void:
 	if _action_mode == "move" and not _move_targets.is_empty():
 		move_button.text = "Confirm Move (%d)" % _move_targets.size()
 	else:
-		move_button.text = "Move (1 AP, +1 RP)"
+		move_button.text = "Move (+1 RP)"
 
 
 # --- Per-frame hover: unit highlight, tile tooltip, move path preview ---
@@ -1331,6 +1379,49 @@ func _setup_unit_popup() -> void:
 	add_child(_unit_popup)
 
 
+func _setup_leave_game_dialog() -> void:
+	if _leave_game_dialog != null:
+		return
+	_leave_game_dialog = AcceptDialog.new()
+	_leave_game_dialog.title = "Leave Game"
+	_leave_game_dialog.dialog_text = "Leave this match?"
+	_leave_game_dialog.add_cancel_button("Cancel")
+	if GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
+		_leave_game_dialog.add_button("Save & Exit", false, "save_exit")
+		_leave_game_dialog.add_button("Exit without Saving", false, "exit")
+	else:
+		_leave_game_dialog.add_button("Leave Game", false, "exit")
+	_leave_game_dialog.custom_action.connect(_on_leave_game_dialog_action)
+	add_child(_leave_game_dialog)
+
+
+func _on_leave_game_pressed() -> void:
+	if _leave_game_dialog == null:
+		_setup_leave_game_dialog()
+	if GameState.is_online() and match_ctrl.can_save_match() and not _match_ending:
+		_leave_game_dialog.popup_centered()
+	else:
+		_exit_to_main_menu(false)
+
+
+func _on_leave_game_dialog_action(action: StringName) -> void:
+	if String(action) == "save_exit":
+		_exit_to_main_menu(true)
+	elif String(action) == "exit":
+		_exit_to_main_menu(false)
+
+
+func _exit_to_main_menu(save_first: bool) -> void:
+	if save_first and GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
+		var snapshot: Dictionary = SaveGameManager.build_snapshot(match_ctrl)
+		if not SaveGameManager.save_snapshot(snapshot):
+			log_label.text = "Failed to save match."
+			return
+	NetworkManager.disconnect_game()
+	GameState.reset_match_state()
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+
+
 func _setup_turn_banner() -> void:
 	_turn_banner = PanelContainer.new()
 	_turn_banner.name = "TurnBanner"
@@ -1549,7 +1640,7 @@ func _rebuild_unit_action_buttons(unit: UnitBase) -> void:
 
 	var targets_in_range: int = _count_attack_targets(unit, los_check)
 	_add_unit_action_button(
-		"Attack (1 AP)" + (" — %d target(s)" % targets_in_range if targets_in_range > 0 else ""),
+		"Attack" + (" — %d target(s)" % targets_in_range if targets_in_range > 0 else ""),
 		can_spend and targets_in_range > 0,
 		"Select an enemy in range to attack." if can_spend and targets_in_range > 0 else "No valid targets in range.",
 		func() -> void:
@@ -1560,7 +1651,7 @@ func _rebuild_unit_action_buttons(unit: UnitBase) -> void:
 
 	var ability_check: Dictionary = _get_ability_action_status(unit, rp, can_spend)
 	_add_unit_action_button(
-		"Ability (1 AP + %d RP)" % unit.ability_cost,
+		"Ability (%d RP)" % unit.ability_cost,
 		ability_check.get("enabled", false),
 		ability_check.get("hint", ""),
 		func() -> void:
@@ -1570,7 +1661,7 @@ func _rebuild_unit_action_buttons(unit: UnitBase) -> void:
 	var tile: TileBase = match_ctrl.grid.get_tile(unit.hex_position)
 	var can_tile: bool = can_spend and tile != null and tile.can_interact(unit)
 	_add_unit_action_button(
-		"Tile Interact (1 AP)",
+		"Tile Interact",
 		can_tile,
 		"Use the tile beneath this unit." if can_tile else "No interactable tile here.",
 		func() -> void:
@@ -1979,6 +2070,8 @@ func _refresh_leader_panels() -> void:
 		viewer = 0
 	_populate_leader_panel(_player_leader_box, viewer)
 	_populate_leader_panel(_enemy_leader_box, 1 - viewer)
+	_update_player_panel_stats(viewer)
+	_update_player_panel_stats(1 - viewer)
 
 
 func _populate_leader_panel(box: VBoxContainer, player_id: int) -> void:
@@ -2012,6 +2105,37 @@ func _rebuild_leader_panel(box: VBoxContainer, player_id: int, leaders: Array[Un
 	box.add_child(_make_leader_header(player_id, team))
 	for leader in leaders:
 		box.add_child(_make_leader_row(leader, team.team_color))
+	box.add_child(_make_player_stats_label(player_id))
+
+
+func _make_player_stats_label(player_id: int) -> Label:
+	var stats := Label.new()
+	stats.name = "PlayerStats"
+	stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stats.add_theme_font_size_override("font_size", 11)
+	stats.add_theme_color_override("font_color", Color(0.78, 0.82, 0.9))
+	_player_panel_stats[player_id] = stats
+	_update_player_panel_stats(player_id)
+	return stats
+
+
+func _update_player_panel_stats(player_id: int) -> void:
+	if not _player_panel_stats.has(player_id):
+		return
+	var label: Label = _player_panel_stats[player_id]
+	var rp: int = match_ctrl.resource_points[player_id]
+	var rp_max: int = match_ctrl.get_max_resource(player_id)
+	var ap_part: String
+	if match_ctrl.placement_active or _placement_active:
+		ap_part = "AP: —"
+	elif match_ctrl.turn_manager.current_player == player_id:
+		ap_part = "AP: %d / %d" % [
+			match_ctrl.turn_manager.actions_remaining,
+			TurnManager.ACTIONS_PER_TURN,
+		]
+	else:
+		ap_part = "AP: —"
+	label.text = "%s  |  RP: %d / %d" % [ap_part, rp, rp_max]
 
 
 func _make_leader_header(player_id: int, team: TeamDefinition) -> Label:
@@ -2284,6 +2408,8 @@ func _find_losing_leader_position(loser_id: int) -> Vector2:
 func _on_match_over(winner_id: int) -> void:
 	_match_ending = true
 	GameState.last_winner_id = winner_id
+	if GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
+		SaveGameManager.delete_save()
 	_deselect_unit()
 	_update_action_buttons()
 

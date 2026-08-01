@@ -6,6 +6,7 @@ extends Control
 @onready var join_button: Button = %JoinButton
 @onready var address_input: LineEdit = %AddressInput
 @onready var status_label: Label = %StatusLabel
+@onready var ip_label: Label = %IpLabel
 
 
 func _ready() -> void:
@@ -16,6 +17,21 @@ func _ready() -> void:
 	NetworkManager.connection_succeeded.connect(_on_connected)
 	NetworkManager.connection_failed.connect(_on_connection_failed)
 	address_input.text = "127.0.0.1"
+	_refresh_ip_label()
+
+
+func _refresh_ip_label() -> void:
+	var addresses: PackedStringArray = PackedStringArray()
+	for addr: String in IP.get_local_addresses():
+		if addr.contains(".") and not addr.begins_with("127."):
+			addresses.append(addr)
+	if addresses.is_empty():
+		for addr: String in IP.get_local_addresses():
+			if addr.contains("."):
+				addresses.append(addr)
+	if addresses.is_empty():
+		addresses.append("127.0.0.1")
+	ip_label.text = "Your IP: %s  (port %d)" % [", ".join(addresses), NetworkManager.DEFAULT_PORT]
 
 
 func _on_local_pressed() -> void:

@@ -848,3 +848,175 @@ func _reveal_hex_if_hidden(hex: Vector2i) -> void:
 
 func _fail(msg: String) -> Dictionary:
 	return {"success": false, "message": msg}
+
+
+func is_match_started() -> bool:
+	return _match_started
+
+
+func can_save_match() -> bool:
+	return _match_started or placement_active
+
+
+func export_snapshot() -> Dictionary:
+	var tiles: Array[Dictionary] = []
+	var hex_keys: Dictionary = {}
+	for hex in grid.get_all_hexes():
+		hex_keys[hex] = true
+	for hex in _pending_reveal.keys():
+		hex_keys[hex] = true
+	for hex in hex_keys.keys():
+		tiles.append(_export_tile_snapshot(hex))
+
+	var unit_snapshots: Array[Dictionary] = []
+	for unit in units:
+		unit_snapshots.append(_export_unit_snapshot(unit))
+
+	return {
+		"resource_points": resource_points.duplicate(),
+		"turn_manager": {
+			"current_player": turn_manager.current_player,
+			"actions_remaining": turn_manager.actions_remaining,
+			"turn_number": turn_manager.turn_number,
+		},
+		"placement_active": placement_active,
+		"placement_player": placement_player,
+		"match_started": _match_started,
+		"rng_seed": rng.seed,
+		"tiles": tiles,
+		"units": unit_snapshots,
+	}
+
+
+func restore_from_snapshot(snapshot: Dictionary) -> void:
+	grid = HexGrid.new()
+	units.clear()
+	_pending_reveal.clear()
+	_pending_team_ids.clear()
+
+	resource_points = _restore_int_array(snapshot.get("resource_points", [0, 0]), 2)
+
+	for tile_data_variant in snapshot.get("tiles", []):
+		if typeof(tile_data_variant) != TYPE_DICTIONARY:
+			continue
+		_restore_tile_snapshot(tile_data_variant)
+
+	for unit_data_variant in snapshot.get("units", []):
+		if typeof(unit_data_variant) != TYPE_DICTIONARY:
+			continue
+		var unit: UnitBase = _restore_unit_snapshot(unit_data_variant)
+		if unit != null:
+			units.append(unit)
+
+	var turn_data: Dictionary = snapshot.get("turn_manager", {})
+	turn_manager.current_player = int(turn_data.get("current_player", 0))
+	turn_manager.actions_remaining = int(turn_data.get("actions_remaining", TurnManager.ACTIONS_PER_TURN))
+	turn_manager.turn_number = int(turn_data.get("turn_number", 1))
+
+	placement_active = bool(snapshot.get("placement_active", false))
+	placement_player = int(snapshot.get("placement_player", 0))
+	_match_started = bool(snapshot.get("match_started", false))
+	rng.seed = int(snapshot.get("rng_seed", 0))
+	state_changed.emit()
+
+
+func _export_tile_snapshot(hex: Vector2i) -> Dictionary:
+	if _pending_reveal.has(hex):
+		return {
+			"q": hex.x,
+			"r": hex.y,
+			"type_id": String(_pending_reveal[hex]),
+			"pending": true,
+			"team_id": int(_pending_team_ids.get(hex, -1)),
+			"revealed": false,
+			"is_home_base": false,
+			"home_base_owner_id": -1,
+		}
+	var tile: TileBase = grid.get_tile(hex)
+	return {
+		"q": hex.x,
+		"r": hex.y,
+		"type_id": tile.get_tile_type_id(),
+		"pending": false,
+		"team_id": tile.team_id,
+		"revealed": tile.revealed,
+		"is_home_base": tile.is_home_base,
+		"home_base_owner_id": tile.home_base_owner_id,
+	}
+
+
+func _export_unit_snapshot(unit: UnitBase) -> Dictionary:
+	return {
+		"type_id": unit.get_unit_type_id(),
+		"id": unit.id,
+		"owner_id": unit.owner_id,
+		"team_id": unit.team_id,
+		"q": unit.hex_position.x,
+		"r": unit.hex_position.y,
+		"health": unit.health,
+		"max_health": unit.max_health,
+		"is_alive": unit.is_alive,
+		"is_leader": unit.is_leader,
+		"is_minion": unit.is_minion,
+		"is_ai_controlled": unit.is_ai_controlled,
+		"summoner_id": unit.summoner_id,
+		"damage_bonus": unit.damage_bonus,
+		"defense_bonus": unit.defense_bonus,
+	}
+
+
+func _restore_tile_snapshot(tile_data: Dictionary) -> void:
+	var hex := Vector2i(int(tile_data.get("q", 0)), int(tile_data.get("r", 0)))
+	if bool(tile_data.get("pending", false)):
+		var type_id: String = String(tile_data.get("type_id", "plain"))
+		_pending_reveal[hex] = type_id
+		var team_id: int = int(tile_data.get("team_id", -1))
+		if team_id >= 0:
+			_pending_team_ids[hex] = team_id
+		grid.set_tile(hex, TileRegistry.create("hidden", hex))
+		return
+
+	var type_id: String = String(tile_data.get("type_id", "plain"))
+	var team_id: int = int(tile_data.get("team_id", -1))
+	var tile: TileBase = TileRegistry.create(type_id, hex, team_id)
+	tile.revealed = bool(tile_data.get("revealed", true))
+	tile.is_home_base = bool(tile_data.get("is_home_base", false))
+	tile.home_base_owner_id = int(tile_data.get("home_base_owner_id", -1))
+	grid.set_tile(hex, tile)
+
+
+func _restore_unit_snapshot(unit_data: Dictionary) -> UnitBase:
+	var type_id: String = String(unit_data.get("type_id", ""))
+	var owner_id: int = int(unit_data.get("owner_id", 0))
+	var team_id: int = int(unit_data.get("team_id", 0))
+	var unit: UnitBase
+	if bool(unit_data.get("is_minion", false)):
+		unit = UnitRegistry.create_minion(type_id, owner_id, team_id, units.size())
+	else:
+		unit = UnitRegistry.create(type_id, owner_id, team_id, units.size())
+	unit.id = String(unit_data.get("id", unit.id))
+	var hex := Vector2i(int(unit_data.get("q", 0)), int(unit_data.get("r", 0)))
+	if hex == UNPLACED_HEX:
+		unit.hex_position = UNPLACED_HEX
+	else:
+		unit.hex_position = hex
+	unit.health = int(unit_data.get("health", unit.max_health))
+	unit.max_health = int(unit_data.get("max_health", unit.max_health))
+	unit.is_alive = bool(unit_data.get("is_alive", true))
+	unit.is_leader = bool(unit_data.get("is_leader", false))
+	unit.is_minion = bool(unit_data.get("is_minion", false))
+	unit.is_ai_controlled = bool(unit_data.get("is_ai_controlled", false))
+	unit.summoner_id = String(unit_data.get("summoner_id", ""))
+	unit.damage_bonus = int(unit_data.get("damage_bonus", 0))
+	unit.defense_bonus = int(unit_data.get("defense_bonus", 0))
+	return unit
+
+
+func _restore_int_array(values: Variant, expected_size: int) -> Array[int]:
+	var result: Array[int] = []
+	if typeof(values) == TYPE_ARRAY:
+		for value in values:
+			result.append(int(value))
+	while result.size() < expected_size:
+		result.append(0)
+	return result

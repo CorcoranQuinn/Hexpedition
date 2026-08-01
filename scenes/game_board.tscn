@@ -55,6 +55,11 @@ unique_name_in_owner = true
 layout_mode = 2
 text = "End Turn (skip remaining)"
 
+[node name="LeaveGameButton" type="Button" parent="Sidebar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Leave Game"
+
 [node name="UnitInfo" type="Label" parent="Sidebar"]
 unique_name_in_owner = true
 layout_mode = 2

@@ -17,6 +17,9 @@ var last_winner_id: int = -1
 var pending_rematch_same_teams: bool = false
 var pending_rematch_new_select: bool = false
 var match_seed: int = -1
+var pending_saved_match_resume: bool = false
+var pending_saved_match_data: Dictionary = {}
+var saved_match_summary: Dictionary = {}
 
 
 # --- Reset between menus / rematches ---
@@ -29,6 +32,9 @@ func reset_match_state() -> void:
 	pending_rematch_same_teams = false
 	pending_rematch_new_select = false
 	match_seed = -1
+	pending_saved_match_resume = false
+	pending_saved_match_data = {}
+	saved_match_summary = {}
 	match_config_changed.emit()
 
 
