@@ -52,12 +52,12 @@ func _ready() -> void:
 		p2_status.text = "AI: random team on lock-in"
 		confirm_button.text = "Lock In"
 		confirm_button.tooltip_text = "Or double-click a leader icon."
-	elif GameState.match_mode == GameState.MatchMode.ONLINE_HOST:
-		start_button.visible = true
-	elif GameState.match_mode == GameState.MatchMode.ONLINE_CLIENT:
-		start_button.visible = false
+	else:
+		confirm_button.tooltip_text = "Double-click a leader icon to lock in without starting."
 
-	confirm_button.tooltip_text = "Double-click a leader icon to lock in without starting."
+
+func _can_local_player_start() -> bool:
+	return GameState.match_mode != GameState.MatchMode.ONLINE_CLIENT
 
 
 func _resolve_local_slot() -> void:
@@ -241,19 +241,12 @@ func _refresh_icon_highlights() -> void:
 func _refresh_action_buttons() -> void:
 	var control_slot: int = _get_control_slot()
 	var slot_locked: bool = _is_slot_locked(control_slot)
+	var all_locked: bool = GameState.all_teams_locked()
+
 	confirm_button.disabled = slot_locked or _teams.is_empty()
 	unlock_button.disabled = not slot_locked
-	unlock_button.visible = slot_locked
-
-	var all_locked: bool = GameState.all_teams_locked()
-	start_button.disabled = not all_locked
-
-	if GameState.is_solo():
-		start_button.visible = all_locked
-	elif GameState.match_mode == GameState.MatchMode.ONLINE_CLIENT:
-		start_button.visible = false
-	else:
-		start_button.visible = true
+	random_button.disabled = slot_locked
+	start_button.disabled = not all_locked or not _can_local_player_start()
 
 
 func _refresh_player_status() -> void:

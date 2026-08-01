@@ -129,7 +129,7 @@ text = "Lock In"
 [node name="UnlockButton" type="Button" parent="Margin/Root/ActionRow"]
 unique_name_in_owner = true
 layout_mode = 2
-visible = false
+disabled = true
 text = "Unselect"
 
 [node name="RandomButton" type="Button" parent="Margin/Root/ActionRow"]
@@ -153,7 +153,6 @@ text = "Player 2: not selected"
 unique_name_in_owner = true
 layout_mode = 2
 disabled = true
-visible = false
 text = "Start Match"
 
 [node name="BackButton" type="Button" parent="Margin/Root"]
