@@ -9,6 +9,11 @@ var display_name: String = "Tile"
 var is_team_unique: bool = false
 var team_id: int = -1  # -1 = neutral
 
+## Set when a player's leader is deployed here at match start. Reserved for
+## future faction rules that care about the home tile.
+var is_home_base: bool = false
+var home_base_owner_id: int = -1
+
 
 # --- Identity and display (subclasses set colors and labels) ---
 

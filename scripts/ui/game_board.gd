@@ -81,9 +81,22 @@ var _player_leader_box: VBoxContainer
 var _enemy_leader_box: VBoxContainer
 var _leader_rows: Dictionary = {}  ## unit_id -> { panel, name, bar, fill, color }
 
+# --- Match intro + pre-game unit deployment ---
+var _intro_animating: bool = false
+var _placement_active: bool = false
+var _placement_overlay: Node2D
+var _placement_zone_nodes: Dictionary = {}  ## hex -> Polygon2D highlight
+var _placement_selected_unit_id: String = ""
+
 # --- Move path preview colors ---
 const PATH_COLOR_CONFIRMED := Color(0.35, 0.85, 0.95, 0.9)
 const PATH_COLOR_PREVIEW := Color(1.0, 0.92, 0.45, 0.75)
+
+# --- Match intro and pre-game deployment ---
+const MAP_INTRO_TILE_DELAY: float = 0.018
+const MAP_INTRO_TILE_DURATION: float = 0.14
+const PLACEMENT_ZONE_COLOR := Color(0.35, 0.95, 0.55, 0.22)
+const PLACEMENT_ZONE_BORDER := Color(0.45, 1.0, 0.65, 0.75)
 
 
 # --- Lifecycle: wire signals, start or resume match, build visuals ---
@@ -104,6 +117,8 @@ func _ready() -> void:
 	match_ctrl.match_over.connect(_on_match_over)
 	match_ctrl.combat_event.connect(_on_combat_event)
 	NetworkManager.action_applied.connect(_on_network_action)
+	NetworkManager.placement_submit_received.connect(_on_placement_submit_received)
+	NetworkManager.placement_snapshot_applied.connect(_on_network_placement_snapshot)
 
 	if GameState.pending_rematch_same_teams:
 		GameState.pending_rematch_same_teams = false
@@ -131,10 +146,14 @@ func _ready() -> void:
 	_setup_unit_popup()
 	_setup_camera_controls()
 	_setup_leader_panels()
+	_setup_placement_overlay()
+	_update_action_buttons()
+	set_process(true)
+	await _play_map_intro()
+	await _run_placement_phase()
 	_cache_base_yaws()
 	_update_camera_for_active_player(false)
 	_refresh_ui()
-	set_process(true)
 
 
 # --- Turn flow callbacks ---
@@ -202,7 +221,271 @@ func _build_board_visuals() -> void:
 		_tile_nodes[hex] = poly
 
 	for unit in match_ctrl.units:
-		_spawn_unit_visual(unit)
+		if match_ctrl.is_unit_placed(unit):
+			_spawn_unit_visual(unit)
+
+
+func _prepare_tiles_for_intro() -> void:
+	for hex in _tile_nodes:
+		var poly: Polygon2D = _tile_nodes[hex]
+		poly.scale = Vector2.ZERO
+		poly.modulate = Color(1.0, 1.0, 1.0, 0.0)
+
+
+func _play_map_intro() -> void:
+	_intro_animating = true
+	_prepare_tiles_for_intro()
+	log_label.text = "Generating battlefield..."
+
+	var hexes: Array = match_ctrl.grid.get_all_hexes()
+	hexes.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return HexCoords.distance(a, Vector2i.ZERO) < HexCoords.distance(b, Vector2i.ZERO),
+	)
+
+	for i in hexes.size():
+		var hex: Vector2i = hexes[i]
+		var poly: Polygon2D = _tile_nodes[hex]
+		var delay: float = float(i) * MAP_INTRO_TILE_DELAY
+		var tween := create_tween()
+		tween.set_parallel(true)
+		tween.tween_property(poly, "scale", Vector2.ONE, MAP_INTRO_TILE_DURATION)\
+			.set_delay(delay).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tween.tween_property(poly, "modulate:a", 1.0, MAP_INTRO_TILE_DURATION * 0.7)\
+			.set_delay(delay)
+
+	await get_tree().create_timer(
+		float(hexes.size()) * MAP_INTRO_TILE_DELAY + MAP_INTRO_TILE_DURATION + 0.08,
+	).timeout
+	_intro_animating = false
+	log_label.text = "Choose deployment positions."
+
+
+func _setup_placement_overlay() -> void:
+	_placement_overlay = Node2D.new()
+	_placement_overlay.name = "PlacementOverlay"
+	_placement_overlay.z_index = 3
+	_ground_pivot.add_child(_placement_overlay)
+
+
+func _run_placement_phase() -> void:
+	_placement_active = true
+	_update_action_buttons()
+	while match_ctrl.placement_active:
+		var pid: int = match_ctrl.placement_player
+		_camera_owner_id = -1
+		_update_camera_for_active_player(true)
+		_select_next_placement_unit(pid)
+		_refresh_placement_highlights()
+		_update_placement_ui()
+		if _should_auto_place(pid):
+			await get_tree().create_timer(0.55).timeout
+			MatchAI.run_placement(match_ctrl, pid)
+			_on_player_finished_placing(pid)
+			continue
+		await _wait_for_placement_player(pid)
+	_placement_active = false
+	_clear_placement_highlights()
+	_update_action_buttons()
+
+
+func _wait_for_placement_player(player_id: int) -> void:
+	while match_ctrl.placement_active and match_ctrl.placement_player == player_id:
+		await match_ctrl.state_changed
+	_on_player_finished_placing(player_id)
+
+
+func _on_player_finished_placing(player_id: int) -> void:
+	for unit in match_ctrl.units:
+		if unit.owner_id == player_id and match_ctrl.is_unit_placed(unit):
+			if not _unit_nodes.has(unit.id):
+				_spawn_unit_visual(unit, true)
+	_refresh_placement_highlights()
+	_update_placement_ui()
+
+
+func _should_auto_place(player_id: int) -> bool:
+	return GameState.is_solo() and player_id == GameState.get_ai_player_id()
+
+
+func _is_local_placement_player(player_id: int) -> bool:
+	if GameState.is_solo():
+		return player_id == 0
+	if GameState.match_mode == GameState.MatchMode.LOCAL:
+		return true
+	return player_id == GameState.get_local_player_id()
+
+
+func _get_roster_units(player_id: int) -> Array[UnitBase]:
+	var result: Array[UnitBase] = []
+	for unit in match_ctrl.units:
+		if unit.owner_id == player_id:
+			result.append(unit)
+	return result
+
+
+func _select_next_placement_unit(player_id: int) -> void:
+	var unplaced: Array[UnitBase] = match_ctrl.get_unplaced_units(player_id)
+	if unplaced.is_empty():
+		_placement_selected_unit_id = ""
+		return
+	if _placement_selected_unit_id.is_empty():
+		_placement_selected_unit_id = unplaced[0].id
+		return
+	for unit in unplaced:
+		if unit.id == _placement_selected_unit_id:
+			return
+	_placement_selected_unit_id = unplaced[0].id
+
+
+func _get_selected_placement_unit(player_id: int) -> UnitBase:
+	if _placement_selected_unit_id.is_empty():
+		return null
+	for unit in match_ctrl.get_unplaced_units(player_id):
+		if unit.id == _placement_selected_unit_id:
+			return unit
+	return null
+
+
+func _refresh_placement_highlights() -> void:
+	if _placement_overlay == null:
+		return
+	for hex in _placement_zone_nodes:
+		var node: Polygon2D = _placement_zone_nodes[hex]
+		if is_instance_valid(node):
+			node.queue_free()
+	_placement_zone_nodes.clear()
+
+	if not _placement_active or not match_ctrl.placement_active:
+		return
+
+	var pid: int = match_ctrl.placement_player
+	for hex in match_ctrl.get_placement_zone(pid):
+		var poly := Polygon2D.new()
+		var points: PackedVector2Array = PackedVector2Array()
+		for i in 6:
+			var angle: float = deg_to_rad(60 * i - 30)
+			points.append(Vector2(cos(angle), sin(angle)) * (HEX_SIZE - 1.0))
+		poly.polygon = points
+		poly.color = PLACEMENT_ZONE_COLOR
+		poly.position = HexCoords.axial_to_pixel(hex, HEX_SIZE)
+		var border := Line2D.new()
+		border.points = points
+		border.closed = true
+		border.width = 1.5
+		border.default_color = PLACEMENT_ZONE_BORDER
+		border.antialiased = true
+		poly.add_child(border)
+		_placement_overlay.add_child(poly)
+		_placement_zone_nodes[hex] = poly
+
+
+func _clear_placement_highlights() -> void:
+	for hex in _placement_zone_nodes:
+		var node: Polygon2D = _placement_zone_nodes[hex]
+		if is_instance_valid(node):
+			node.queue_free()
+	_placement_zone_nodes.clear()
+
+
+func _update_placement_ui() -> void:
+	if not _placement_active:
+		return
+	var pid: int = match_ctrl.placement_player
+	var team: TeamDefinition = TeamRegistry.get_team(GameState.selected_team_ids[pid])
+	var who: String = "You" if _is_local_placement_player(pid) else "Player %d" % (pid + 1)
+	if GameState.is_solo() and pid == GameState.get_ai_player_id():
+		who = "AI"
+
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("Deploy units — %s" % who)
+	lines.append("Team: %s" % team.team_name)
+	lines.append("")
+	lines.append("Place each unit in the highlighted rear rows.")
+	lines.append("Your leader's starting tile becomes your home base.")
+	lines.append("")
+
+	var unplaced: Array[UnitBase] = match_ctrl.get_unplaced_units(pid)
+	for unit in _get_roster_units(pid):
+		if match_ctrl.is_unit_placed(unit):
+			lines.append("✓ %s — deployed" % unit.display_name)
+		elif unit.id == _placement_selected_unit_id:
+			lines.append("► %s — click a highlighted hex" % unit.display_name)
+		else:
+			lines.append("  %s — waiting" % unit.display_name)
+
+	if unplaced.is_empty():
+		lines.append("")
+		lines.append("Deployment complete.")
+	unit_info.text = "\n".join(lines)
+	_rebuild_placement_unit_picker(pid)
+
+
+func _rebuild_placement_unit_picker(player_id: int) -> void:
+	_clear_unit_action_buttons()
+	if not _placement_active or not _is_local_placement_player(player_id):
+		return
+	if match_ctrl.placement_player != player_id:
+		return
+	for unit in match_ctrl.get_unplaced_units(player_id):
+		var is_selected: bool = unit.id == _placement_selected_unit_id
+		var label: String = ("► " if is_selected else "") + unit.display_name
+		_add_unit_action_button(
+			label,
+			true,
+			"Select this unit to deploy." if not is_selected else "Currently selected for deployment.",
+			func() -> void:
+				_placement_selected_unit_id = unit.id
+				_update_placement_ui(),
+		)
+
+
+func _handle_placement_click(hex: Vector2i) -> void:
+	if not _placement_active or not match_ctrl.placement_active:
+		return
+	var pid: int = match_ctrl.placement_player
+	if not _is_local_placement_player(pid):
+		return
+	var unit: UnitBase = _get_selected_placement_unit(pid)
+	if unit == null:
+		log_label.text = "Select a unit to deploy."
+		return
+	if GameState.is_online() and not multiplayer.is_server():
+		NetworkManager.rpc_submit_placement_unit.rpc_id(1, pid, unit.id, hex)
+		return
+	var result: Dictionary = match_ctrl.place_unit(pid, unit.id, hex)
+	if GameState.is_online() and multiplayer.is_server():
+		NetworkManager.rpc_apply_placement_snapshot.rpc(result)
+	_apply_placement_result(result)
+
+
+func _on_placement_submit_received(player_id: int, unit_id: String, hex: Vector2i) -> void:
+	if not GameState.is_online() or not multiplayer.is_server():
+		return
+	var result: Dictionary = match_ctrl.place_unit(player_id, unit_id, hex)
+	NetworkManager.rpc_apply_placement_snapshot.rpc(result)
+
+
+func _on_network_placement_snapshot(snapshot: Dictionary) -> void:
+	if not snapshot.get("success", false):
+		if _placement_active:
+			log_label.text = snapshot.get("message", "Deployment rejected.")
+		return
+	match_ctrl.apply_placement_snapshot(snapshot)
+	_apply_placement_result(snapshot)
+
+
+func _apply_placement_result(result: Dictionary) -> void:
+	if not result.get("success", false):
+		log_label.text = result.get("message", "Deployment failed.")
+		return
+	var unit: UnitBase = match_ctrl.find_unit_by_id(str(result.get("unit_id", "")))
+	if unit == null:
+		return
+	log_label.text = result.get("message", "Deployed.")
+	_spawn_unit_visual(unit, true)
+	_select_next_placement_unit(unit.owner_id)
+	_refresh_placement_highlights()
+	_update_placement_ui()
 
 
 func _make_hex_polygon(tile: TileBase) -> Polygon2D:
@@ -273,6 +556,8 @@ func _refresh_tile_decor(poly: Polygon2D, tile: TileBase) -> void:
 
 
 func _spawn_unit_visual(unit: UnitBase, animate_spawn: bool = false) -> void:
+	if not match_ctrl.is_unit_placed(unit):
+		return
 	if _unit_nodes.has(unit.id):
 		return
 
@@ -373,6 +658,10 @@ func _update_unit_visual_states() -> void:
 
 # --- Sidebar sync: turn counters, tile colors, unit positions, action buttons ---
 func _refresh_ui() -> void:
+	if match_ctrl.placement_active or _placement_active:
+		_update_placement_ui()
+		_update_action_buttons()
+		return
 	var pid: int = match_ctrl.turn_manager.current_player
 	if GameState.is_solo():
 		var who: String = "Your Turn" if pid == 0 else "AI Turn"
@@ -405,6 +694,8 @@ func _update_board_colors() -> void:
 
 func _update_unit_positions() -> void:
 	for unit in match_ctrl.units:
+		if not match_ctrl.is_unit_placed(unit):
+			continue
 		if not unit.is_alive:
 			if _units_dying.has(unit.id):
 				continue
@@ -424,11 +715,11 @@ func _update_unit_positions() -> void:
 
 func _update_action_buttons() -> void:
 	var can_act: bool = _can_local_player_act()
-	move_button.disabled = not can_act
-	attack_button.disabled = not can_act
-	ability_button.disabled = not can_act
-	tile_button.disabled = not can_act
-	end_turn_button.disabled = not can_act
+	move_button.disabled = not can_act or match_ctrl.placement_active
+	attack_button.disabled = not can_act or match_ctrl.placement_active
+	ability_button.disabled = not can_act or match_ctrl.placement_active
+	tile_button.disabled = not can_act or match_ctrl.placement_active
+	end_turn_button.disabled = not can_act or match_ctrl.placement_active
 	if _action_mode != "move" or _move_targets.is_empty():
 		move_button.text = "Move (1 AP, +1 RP)"
 	attack_button.text = "Attack (1 AP)"
@@ -438,6 +729,8 @@ func _update_action_buttons() -> void:
 
 # --- Who may click actions (solo human, hot-seat, or online local player) ---
 func _can_local_player_act() -> bool:
+	if _intro_animating or _placement_active or match_ctrl.placement_active:
+		return false
 	if GameState.is_solo():
 		return match_ctrl.turn_manager.current_player == 0 and match_ctrl.turn_manager.can_spend_action() and not _ai_running
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
@@ -454,6 +747,12 @@ func _on_turn_started(player_id: int) -> void:
 
 
 func _get_active_player_id() -> int:
+	if match_ctrl.placement_active:
+		if GameState.is_solo():
+			return 0
+		if GameState.match_mode == GameState.MatchMode.LOCAL:
+			return match_ctrl.placement_player
+		return GameState.get_local_player_id()
 	if GameState.match_mode == GameState.MatchMode.LOCAL:
 		return match_ctrl.turn_manager.current_player
 	if GameState.is_solo():
@@ -621,6 +920,10 @@ func _update_move_button_label() -> void:
 func _process(_delta: float) -> void:
 	_sync_camera_dependent_visuals()
 	_position_unit_popup()
+	if _intro_animating:
+		return
+	if _placement_active or match_ctrl.placement_active:
+		return
 	if _ai_running or _match_ending or _move_animating:
 		if _match_ending:
 			_tile_tooltip.visible = false
@@ -665,8 +968,18 @@ func _unhandled_input(event: InputEvent) -> void:
 				_reset_camera_view()
 				return
 			KEY_ESCAPE:
+				if _placement_active:
+					return
 				_deselect_unit()
 				return
+	if _intro_animating:
+		return
+	if _placement_active or match_ctrl.placement_active:
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			var hex: Vector2i = _hex_under_mouse()
+			if match_ctrl.grid.has_tile(hex):
+				_handle_placement_click(hex)
+		return
 	if _match_ending or _move_animating:
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
@@ -1139,7 +1452,7 @@ func _compute_base_yaw(player_id: int) -> float:
 	var centroid: Vector2 = Vector2.ZERO
 	var count: int = 0
 	for unit in match_ctrl.units:
-		if unit.owner_id == player_id:
+		if unit.owner_id == player_id and match_ctrl.is_unit_placed(unit):
 			centroid += HexCoords.axial_to_pixel(unit.hex_position, HEX_SIZE)
 			count += 1
 	if count == 0:

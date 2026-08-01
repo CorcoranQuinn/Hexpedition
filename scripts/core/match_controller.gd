@@ -11,6 +11,11 @@ const BOARD_RADIUS: int = 4
 const MOUNTAIN_COUNT: int = 9
 const UNIQUE_TILES_PER_TYPE: int = 2
 
+## Deployment corners and the two rearmost q-rows on each player's half.
+const PLACEMENT_CORNERS: Array[Vector2i] = [Vector2i(-3, 2), Vector2i(3, -2)]
+const PLACEMENT_BACK_ROWS: int = 2
+const UNPLACED_HEX: Vector2i = Vector2i(999999, 999999)
+
 const UNIQUE_TILE_DEFS: Array[Dictionary] = [
 	{"type": "sentinel_bastion", "team_id": 0},
 	{"type": "veil_mirror", "team_id": 1},
@@ -27,6 +32,10 @@ var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 var _pending_reveal: Dictionary = {}  # hex -> tile type id (hidden until walked)
 var _pending_team_ids: Dictionary = {}  # hex -> team id for unique tiles
 
+var placement_active: bool = false
+var placement_player: int = 0
+var _match_started: bool = false
+
 
 # --- Match setup: procedural board, team spawn, turn 1 ---
 func setup_match(seed_value: int = -1) -> void:
@@ -40,9 +49,21 @@ func setup_match(seed_value: int = -1) -> void:
 	_pending_reveal.clear()
 	_pending_team_ids.clear()
 	resource_points = [0, 0]
+	_match_started = false
 
 	_generate_board()
-	_spawn_teams()
+	_prepare_teams()
+	placement_active = true
+	placement_player = 0
+	state_changed.emit()
+
+
+## Called once both players have finished deploying their starting units.
+func finalize_match_start() -> void:
+	if not placement_active or _match_started:
+		return
+	placement_active = false
+	_match_started = true
 	turn_manager.start_match(0)
 	state_changed.emit()
 
@@ -50,7 +71,7 @@ func setup_match(seed_value: int = -1) -> void:
 # --- Procedural generation: plain hidden tiles, mountains, team unique tiles ---
 func _generate_board() -> void:
 	var all_hexes: Array = HexCoords.within_radius(Vector2i.ZERO, BOARD_RADIUS)
-	var reserved: Dictionary = _get_reserved_hexes()
+	var reserved: Dictionary = _get_reserved_hexes(all_hexes)
 
 	for hex in all_hexes:
 		_pending_reveal[hex] = "plain"
@@ -78,15 +99,165 @@ func _reveal_starting_terrain(type_id: String) -> void:
 		_reveal_hex_if_hidden(hex)
 
 
-# --- Keep spawn zones clear of random terrain features ---
-func _get_reserved_hexes() -> Dictionary:
+# --- Keep deployment zones clear of random terrain features ---
+func _get_reserved_hexes(all_hexes: Array) -> Dictionary:
 	var reserved: Dictionary = {}
 	for player_id in 2:
-		for hex in _get_spawn_hexes(player_id):
+		for hex in _collect_placement_zone(all_hexes, player_id):
 			reserved[hex] = true
 			for neighbor in HexCoords.neighbors(hex):
 				reserved[neighbor] = true
 	return reserved
+
+
+func get_placement_zone(player_id: int) -> Array[Vector2i]:
+	return _collect_placement_zone(grid.get_all_hexes(), player_id)
+
+
+func _collect_placement_zone(hexes: Array, player_id: int) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	for hex in hexes:
+		if _is_in_placement_zone(hex, player_id):
+			result.append(hex)
+	return result
+
+
+func _is_on_player_side(hex: Vector2i, player_id: int) -> bool:
+	var dist_p0: int = HexCoords.distance(hex, PLACEMENT_CORNERS[0])
+	var dist_p1: int = HexCoords.distance(hex, PLACEMENT_CORNERS[1])
+	if dist_p0 == dist_p1:
+		return false
+	return dist_p0 < dist_p1 if player_id == 0 else dist_p1 < dist_p0
+
+
+func _is_in_placement_zone(hex: Vector2i, player_id: int) -> bool:
+	if not _is_on_player_side(hex, player_id):
+		return false
+	var q: int = hex.x
+	if player_id == 0:
+		var back_q: int = -(BOARD_RADIUS - 1)
+		var front_q: int = back_q + (PLACEMENT_BACK_ROWS - 1)
+		return q >= back_q and q <= front_q
+	var back_q: int = BOARD_RADIUS - 1
+	var front_q: int = back_q - (PLACEMENT_BACK_ROWS - 1)
+	return q <= back_q and q >= front_q
+
+
+func is_unit_placed(unit: UnitBase) -> bool:
+	return unit.hex_position != UNPLACED_HEX
+
+
+func get_unplaced_units(player_id: int) -> Array[UnitBase]:
+	var result: Array[UnitBase] = []
+	for unit in units:
+		if unit.owner_id == player_id and not is_unit_placed(unit):
+			result.append(unit)
+	return result
+
+
+func can_place_at(player_id: int, hex: Vector2i) -> bool:
+	if not placement_active or placement_player != player_id:
+		return false
+	if get_unit_at(hex) != null:
+		return false
+	return _is_in_placement_zone(hex, player_id)
+
+
+func place_unit(player_id: int, unit_id: String, hex: Vector2i) -> Dictionary:
+	if not can_place_at(player_id, hex):
+		return {"success": false, "message": "Can't deploy there."}
+	var unit: UnitBase = _find_unit_by_id(unit_id)
+	if unit == null or unit.owner_id != player_id or is_unit_placed(unit):
+		return {"success": false, "message": "Invalid unit."}
+
+	unit.hex_position = hex
+	grid.on_unit_entered(hex, unit)
+	if unit.is_leader:
+		_mark_home_base(hex, player_id)
+
+	var message: String = "%s deployed." % unit.display_name
+	if get_unplaced_units(player_id).is_empty():
+		_complete_player_placement(player_id)
+		message = "%s deployed. Deployment complete." % unit.display_name
+
+	state_changed.emit()
+	return _make_placement_snapshot(unit_id, message)
+
+
+func place_units_for_player(player_id: int, assignments: Dictionary) -> void:
+	for unit_id in assignments:
+		var hex: Vector2i = assignments[unit_id]
+		var unit: UnitBase = _find_unit_by_id(unit_id)
+		if unit == null or unit.owner_id != player_id or is_unit_placed(unit):
+			continue
+		if not can_place_at(player_id, hex):
+			continue
+		unit.hex_position = hex
+		grid.on_unit_entered(hex, unit)
+		if unit.is_leader:
+			_mark_home_base(hex, player_id)
+	_complete_player_placement(player_id)
+	state_changed.emit()
+
+
+func _complete_player_placement(player_id: int) -> void:
+	if placement_player != player_id:
+		return
+	if player_id == 0:
+		placement_player = 1
+	else:
+		finalize_match_start()
+
+
+func _make_placement_snapshot(unit_id: String, message: String) -> Dictionary:
+	return {
+		"success": true,
+		"message": message,
+		"unit_id": unit_id,
+		"hex": _find_unit_by_id(unit_id).hex_position if _find_unit_by_id(unit_id) != null else Vector2i.ZERO,
+		"placement_player": placement_player,
+		"placement_active": placement_active,
+	}
+
+
+func apply_placement_snapshot(snapshot: Dictionary) -> void:
+	if not snapshot.get("success", false):
+		return
+	var unit: UnitBase = _find_unit_by_id(str(snapshot.get("unit_id", "")))
+	if unit == null:
+		return
+	var hex: Vector2i = snapshot.get("hex", Vector2i.ZERO)
+	if not is_unit_placed(unit):
+		unit.hex_position = hex
+		grid.on_unit_entered(hex, unit)
+		if unit.is_leader:
+			_mark_home_base(hex, unit.owner_id)
+
+	var was_active: bool = placement_active
+	placement_player = int(snapshot.get("placement_player", placement_player))
+	placement_active = bool(snapshot.get("placement_active", placement_active))
+	if was_active and not placement_active and not _match_started:
+		finalize_match_start()
+	state_changed.emit()
+
+
+func _mark_home_base(hex: Vector2i, player_id: int) -> void:
+	var tile: TileBase = grid.get_tile(hex)
+	if tile == null:
+		return
+	tile.is_home_base = true
+	tile.home_base_owner_id = player_id
+
+
+func _find_unit_by_id(unit_id: String) -> UnitBase:
+	for unit in units:
+		if unit.id == unit_id:
+			return unit
+	return null
+
+
+func find_unit_by_id(unit_id: String) -> UnitBase:
+	return _find_unit_by_id(unit_id)
 
 
 func _scatter_tile_type(type_id: String, count: int, reserved: Dictionary) -> void:
@@ -130,28 +301,20 @@ func _shuffle_array(arr: Array) -> void:
 		arr[j] = tmp
 
 
-# --- Place each player's leader + followers on fixed spawn hexes ---
-func _spawn_teams() -> void:
+# --- Create each player's roster, waiting for the pre-game deployment phase ---
+func _prepare_teams() -> void:
 	for player_id in 2:
 		var team_def: TeamDefinition = TeamRegistry.get_team(
 			GameState.selected_team_ids[player_id]
 		)
 		resource_points[player_id] = mini(2, team_def.max_resource_points)
-		var spawn_hexes: Array[Vector2i] = _get_spawn_hexes(player_id)
 		var roster: Array[String] = team_def.get_roster_type_ids()
 		for i in roster.size():
 			var unit: UnitBase = UnitRegistry.create(
 				roster[i], player_id, team_def.team_id, i
 			)
-			unit.hex_position = spawn_hexes[i]
+			unit.hex_position = UNPLACED_HEX
 			units.append(unit)
-			grid.on_unit_entered(unit.hex_position, unit)
-
-
-func _get_spawn_hexes(player_id: int) -> Array[Vector2i]:
-	if player_id == 0:
-		return [Vector2i(-3, 1), Vector2i(-3, 2), Vector2i(-2, 1)]
-	return [Vector2i(3, -1), Vector2i(3, -2), Vector2i(2, -1)]
 
 
 # --- Unit queries used by UI and AI ---
@@ -164,8 +327,10 @@ func get_units_for_player(player_id: int) -> Array[UnitBase]:
 
 
 func get_unit_at(hex: Vector2i) -> UnitBase:
+	if hex == UNPLACED_HEX:
+		return null
 	for u in units:
-		if u.is_alive and u.hex_position == hex:
+		if u.is_alive and is_unit_placed(u) and u.hex_position == hex:
 			return u
 	return null
 

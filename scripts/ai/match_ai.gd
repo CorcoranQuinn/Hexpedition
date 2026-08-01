@@ -11,6 +11,54 @@ static func pick_random_team_id(exclude: int = -1) -> int:
 	return TeamRegistry.pick_random_team_id(exclude)
 
 
+# --- Pre-game deployment for solo mode (AI player) ---
+
+static func run_placement(match_ctrl: MatchController, player_id: int) -> void:
+	var zone: Array[Vector2i] = match_ctrl.get_placement_zone(player_id)
+	var to_place: Array[UnitBase] = match_ctrl.get_unplaced_units(player_id)
+	to_place.sort_custom(func(a: UnitBase, b: UnitBase) -> bool:
+		if a.is_leader != b.is_leader:
+			return a.is_leader
+		return a.id < b.id,
+	)
+
+	var corner: Vector2i = MatchController.PLACEMENT_CORNERS[player_id]
+	zone.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return HexCoords.distance(a, corner) < HexCoords.distance(b, corner),
+	)
+
+	var chosen: Array[Vector2i] = []
+	var assignments: Dictionary = {}
+	for unit in to_place:
+		var best_hex: Vector2i = zone[0]
+		var best_score: float = -INF
+		for hex in zone:
+			if chosen.has(hex):
+				continue
+			var score: float = _score_placement_hex(hex, chosen, unit.is_leader, corner)
+			if score > best_score:
+				best_score = score
+				best_hex = hex
+		assignments[unit.id] = best_hex
+		chosen.append(best_hex)
+
+	match_ctrl.place_units_for_player(player_id, assignments)
+
+
+static func _score_placement_hex(
+	hex: Vector2i,
+	placed: Array[Vector2i],
+	prefer_back: bool,
+	corner: Vector2i,
+) -> float:
+	var score: float = 0.0
+	if prefer_back:
+		score += float(HexCoords.distance(hex, corner)) * 2.0
+	for other in placed:
+		score += float(HexCoords.distance(hex, other)) * 1.5
+	return score
+
+
 static func run_turn(match_ctrl: MatchController, player_id: int) -> void:
 	while match_ctrl.can_act(player_id):
 		if _try_attack(match_ctrl, player_id):
