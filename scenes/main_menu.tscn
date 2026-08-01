@@ -1,8 +1,8 @@
-[gd_scene load_steps=2 format=3 uid="uid://mainmenu001"]
+[gd_scene format=3 uid="uid://mainmenu001"]
 
-[ext_resource type="Script" path="res://scripts/ui/main_menu.gd" id="1"]
+[ext_resource type="Script" uid="uid://b84ka477by41g" path="res://scripts/ui/main_menu.gd" id="1"]
 
-[node name="MainMenu" type="Control"]
+[node name="MainMenu" type="Control" unique_id=1254959389]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -11,7 +11,7 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1")
 
-[node name="VBox" type="VBoxContainer" parent="."]
+[node name="VBox" type="VBoxContainer" parent="." unique_id=710043297]
 layout_mode = 1
 anchors_preset = 8
 anchor_left = 0.5
@@ -27,44 +27,44 @@ grow_vertical = 2
 theme_override_constants/separation = 16
 alignment = 1
 
-[node name="Title" type="Label" parent="VBox"]
+[node name="Title" type="Label" parent="VBox" unique_id=1268637217]
 layout_mode = 2
+theme_override_font_sizes/font_size = 36
 text = "Hex Tactics"
 horizontal_alignment = 1
-theme_override_font_sizes/font_size = 36
 
-[node name="Subtitle" type="Label" parent="VBox"]
+[node name="Subtitle" type="Label" parent="VBox" unique_id=1668208319]
 layout_mode = 2
 text = "Local or P2P hex-grid tactics"
 horizontal_alignment = 1
 
-[node name="LocalButton" type="Button" parent="VBox"]
+[node name="LocalButton" type="Button" parent="VBox" unique_id=174989688]
 unique_name_in_owner = true
 layout_mode = 2
 text = "Local Hot-Seat"
 
-[node name="SoloButton" type="Button" parent="VBox"]
+[node name="SoloButton" type="Button" parent="VBox" unique_id=391965273]
 unique_name_in_owner = true
 layout_mode = 2
 text = "Solo vs AI"
 
-[node name="HostButton" type="Button" parent="VBox"]
+[node name="HostButton" type="Button" parent="VBox" unique_id=1833812265]
 unique_name_in_owner = true
 layout_mode = 2
 text = "Host Online Game"
 
-[node name="AddressInput" type="LineEdit" parent="VBox"]
+[node name="AddressInput" type="LineEdit" parent="VBox" unique_id=1306163275]
 unique_name_in_owner = true
 layout_mode = 2
 placeholder_text = "Host IP address"
 alignment = 1
 
-[node name="JoinButton" type="Button" parent="VBox"]
+[node name="JoinButton" type="Button" parent="VBox" unique_id=2096674566]
 unique_name_in_owner = true
 layout_mode = 2
 text = "Join Online Game"
 
-[node name="StatusLabel" type="Label" parent="VBox"]
+[node name="StatusLabel" type="Label" parent="VBox" unique_id=1631647133]
 unique_name_in_owner = true
 layout_mode = 2
 text = "Choose how to play."
