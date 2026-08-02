@@ -79,7 +79,10 @@ func _generate_board() -> void:
 
 	_scatter_tile_type("mountain", MOUNTAIN_COUNT, _get_mountain_reserved_hexes(all_hexes))
 
+	var playing_teams: Dictionary = _get_playing_team_ids()
 	for tile_def in UNIQUE_TILE_DEFS:
+		if not playing_teams.has(tile_def["team_id"]):
+			continue
 		_scatter_unique_tile(
 			tile_def["type"],
 			tile_def["team_id"],
@@ -88,6 +91,15 @@ func _generate_board() -> void:
 		)
 
 	_reveal_starting_terrain("mountain")
+
+
+func _get_playing_team_ids() -> Dictionary:
+	var playing: Dictionary = {}
+	for player_id in 2:
+		var team_id: int = GameState.selected_team_ids[player_id]
+		if team_id >= 0:
+			playing[team_id] = true
+	return playing
 
 
 func _reveal_starting_terrain(type_id: String) -> void:
@@ -250,6 +262,23 @@ func _parse_snapshot_hex(value) -> Vector2i:
 	if value is Array and value.size() >= 2:
 		return Vector2i(int(value[0]), int(value[1]))
 	return Vector2i.ZERO
+
+
+static func encode_moves(moves: Dictionary) -> Dictionary:
+	var encoded: Dictionary = {}
+	for unit_id in moves:
+		var hex: Vector2i = moves[unit_id]
+		encoded[unit_id] = {"q": hex.x, "r": hex.y}
+	return encoded
+
+
+static func decode_moves(encoded) -> Dictionary:
+	var moves: Dictionary = {}
+	if typeof(encoded) != TYPE_DICTIONARY:
+		return moves
+	for unit_id in encoded:
+		moves[unit_id] = MatchController._parse_snapshot_hex(encoded[unit_id])
+	return moves
 
 
 func apply_placement_snapshot(snapshot: Dictionary) -> void:
@@ -440,12 +469,12 @@ func can_apply_moves(player_id: int, moves: Dictionary) -> Dictionary:
 			return _fail("Invalid unit.")
 		if not unit.is_player_controllable():
 			return _fail("That unit is AI-controlled.")
-		var target: Vector2i = moves[unit_id]
+		var target: Vector2i = _parse_snapshot_hex(moves[unit_id])
 		if not _can_move_unit(unit, target, moves):
 			return _fail("%s cannot reach that hex." % unit.display_name)
 	var targets: Array[Vector2i] = []
 	for unit_id in moves:
-		var target: Vector2i = moves[unit_id]
+		var target: Vector2i = _parse_snapshot_hex(moves[unit_id])
 		var unit: UnitBase = _find_unit(unit_id)
 		if target == unit.hex_position:
 			continue
@@ -467,7 +496,7 @@ func perform_move(player_id: int, moves: Dictionary) -> Dictionary:
 
 	for unit_id in moves:
 		var unit: UnitBase = _find_unit(unit_id)
-		var target: Vector2i = moves[unit_id]
+		var target: Vector2i = _parse_snapshot_hex(moves[unit_id])
 		if target != unit.hex_position:
 			var path: Array[Vector2i] = find_movement_path(unit, target, moves)
 			for hex in path:
@@ -869,6 +898,77 @@ func is_match_started() -> bool:
 
 func can_save_match() -> bool:
 	return _match_started or placement_active
+
+
+func export_action_sync() -> Dictionary:
+	var unit_snapshots: Array[Dictionary] = []
+	for unit in units:
+		unit_snapshots.append(_export_unit_snapshot(unit))
+
+	var tile_snapshots: Array[Dictionary] = []
+	for hex in grid.get_all_hexes():
+		if not _pending_reveal.has(hex):
+			tile_snapshots.append(_export_tile_snapshot(hex))
+
+	return {
+		"resource_points": resource_points.duplicate(),
+		"turn_manager": {
+			"current_player": turn_manager.current_player,
+			"actions_remaining": turn_manager.actions_remaining,
+			"turn_number": turn_manager.turn_number,
+		},
+		"units": unit_snapshots,
+		"tiles": tile_snapshots,
+	}
+
+
+func apply_action_sync(sync: Dictionary) -> void:
+	if sync.is_empty():
+		return
+
+	resource_points = _restore_int_array(sync.get("resource_points", resource_points), 2)
+
+	var turn_data: Dictionary = sync.get("turn_manager", {})
+	if not turn_data.is_empty():
+		turn_manager.current_player = int(turn_data.get("current_player", turn_manager.current_player))
+		turn_manager.actions_remaining = int(turn_data.get("actions_remaining", turn_manager.actions_remaining))
+		turn_manager.turn_number = int(turn_data.get("turn_number", turn_manager.turn_number))
+		turn_manager.actions_changed.emit(turn_manager.actions_remaining)
+
+	for unit_data_variant in sync.get("units", []):
+		if typeof(unit_data_variant) != TYPE_DICTIONARY:
+			continue
+		var unit_data: Dictionary = unit_data_variant
+		var unit_id: String = str(unit_data.get("id", ""))
+		var unit: UnitBase = _find_unit_by_id(unit_id)
+		if unit != null:
+			_apply_unit_sync_data(unit, unit_data)
+			continue
+		unit = _restore_unit_snapshot(unit_data)
+		if unit == null:
+			continue
+		units.append(unit)
+		if is_unit_placed(unit):
+			grid.on_unit_entered(unit.hex_position, unit)
+
+	for tile_data_variant in sync.get("tiles", []):
+		if typeof(tile_data_variant) != TYPE_DICTIONARY:
+			continue
+		_restore_tile_snapshot(tile_data_variant)
+
+	state_changed.emit()
+
+
+func _apply_unit_sync_data(unit: UnitBase, data: Dictionary) -> void:
+	unit.hex_position = Vector2i(
+		int(data.get("q", unit.hex_position.x)),
+		int(data.get("r", unit.hex_position.y)),
+	)
+	unit.health = int(data.get("health", unit.health))
+	unit.max_health = int(data.get("max_health", unit.max_health))
+	unit.is_alive = bool(data.get("is_alive", unit.is_alive))
+	unit.damage_bonus = int(data.get("damage_bonus", 0))
+	unit.defense_bonus = int(data.get("defense_bonus", 0))
 
 
 func export_snapshot() -> Dictionary:

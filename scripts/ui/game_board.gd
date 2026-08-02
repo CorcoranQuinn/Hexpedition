@@ -145,6 +145,7 @@ func _ready() -> void:
 	NetworkManager.action_applied.connect(_on_network_action)
 	NetworkManager.placement_submit_received.connect(_on_placement_submit_received)
 	NetworkManager.placement_snapshot_applied.connect(_on_network_placement_snapshot)
+	NetworkManager.match_sync_applied.connect(_on_match_sync_applied)
 
 	if GameState.pending_rematch_same_teams:
 		GameState.pending_rematch_same_teams = false
@@ -458,6 +459,8 @@ func _run_placement_phase() -> void:
 	_placement_active = false
 	_clear_placement_highlights()
 	_update_action_buttons()
+	if GameState.is_online() and NetworkManager.is_server():
+		NetworkManager.rpc_apply_match_sync.rpc(match_ctrl.export_snapshot())
 
 
 func _wait_for_placement_player(player_id: int) -> void:
@@ -681,6 +684,74 @@ func _on_network_placement_snapshot(snapshot: Dictionary) -> void:
 		return
 	match_ctrl.apply_placement_snapshot(snapshot)
 	_apply_placement_result(snapshot)
+
+
+func _on_match_sync_applied(snapshot: Dictionary) -> void:
+	if NetworkManager.is_server():
+		return
+	match_ctrl.restore_from_snapshot(snapshot)
+	_resync_units_from_state()
+	_update_board_colors()
+	_cache_base_yaws()
+	_refresh_ui()
+	log_label.text = "Match synced with host."
+
+
+func _resync_units_from_state() -> void:
+	for unit_id in _unit_nodes.keys():
+		var node: Node2D = _unit_nodes[unit_id]
+		if is_instance_valid(node):
+			node.queue_free()
+	_unit_nodes.clear()
+	for unit in match_ctrl.units:
+		if match_ctrl.is_unit_placed(unit) and unit.is_alive:
+			_spawn_unit_visual(unit, false)
+
+
+func _attach_action_sync(result: Dictionary) -> Dictionary:
+	if result.get("success", false):
+		result["sync"] = match_ctrl.export_action_sync()
+	return result
+
+
+func _apply_network_action_sync(result: Dictionary, resync_visuals: bool = true) -> void:
+	var sync: Dictionary = result.get("sync", {})
+	if not sync.is_empty():
+		match_ctrl.apply_action_sync(sync)
+	if resync_visuals:
+		_resync_units_from_state()
+	_update_board_colors()
+
+
+func _play_combat_from_result(action_type: String, payload: Dictionary, result: Dictionary) -> void:
+	if action_type == "attack":
+		var target: UnitBase = match_ctrl.find_unit_by_id(str(payload.get("target_id", "")))
+		_on_combat_event("attack", {
+			"attacker_id": str(payload.get("attacker_id", "")),
+			"target_id": str(payload.get("target_id", "")),
+			"damage": int(result.get("damage", 0)),
+			"target_killed": target != null and not target.is_alive,
+		})
+	elif action_type == "ability":
+		var event: Dictionary = {
+			"unit_id": str(payload.get("unit_id", "")),
+		}
+		if result.has("damage"):
+			event["damage"] = result["damage"]
+		if result.has("target_id"):
+			event["target_id"] = result["target_id"]
+			var ability_target: UnitBase = match_ctrl.find_unit_by_id(str(result["target_id"]))
+			if ability_target != null:
+				event["target_killed"] = not ability_target.is_alive
+		if result.has("healed_unit_ids"):
+			event["healed_unit_ids"] = result["healed_unit_ids"]
+		var extra: Dictionary = payload.get("extra", {})
+		if extra.has("summon_hex"):
+			event["summon_hex"] = extra["summon_hex"]
+		var unit: UnitBase = match_ctrl.find_unit_by_id(str(payload.get("unit_id", "")))
+		if unit != null:
+			event["ability_type"] = unit.get_unit_type_id()
+		_on_combat_event("ability", event)
 
 
 func _apply_placement_result(result: Dictionary) -> void:
@@ -1014,11 +1085,16 @@ func _confirm_move() -> void:
 func _run_move_action_async(moves: Dictionary) -> void:
 	var anims: Array = _build_move_animations(moves)
 	var pid: int = _get_active_player_id()
-	var payload: Dictionary = {"player_id": pid, "moves": moves}
-	if GameState.is_online() and not multiplayer.is_server():
+	var payload: Dictionary = {
+		"player_id": pid,
+		"moves": MatchController.encode_moves(moves),
+	}
+	if GameState.is_online() and not NetworkManager.is_server():
 		NetworkManager.rpc_submit_action.rpc_id(1, "move", payload)
-	elif GameState.is_online() and multiplayer.is_server():
-		var result: Dictionary = await _apply_move_with_animation(pid, moves, anims, true)
+	elif GameState.is_online() and NetworkManager.is_server():
+		var result: Dictionary = _attach_action_sync(
+			await _apply_move_with_animation(pid, moves, anims, true),
+		)
 		NetworkManager.rpc_apply_action_result.rpc("move", payload, result)
 	else:
 		await _apply_move_with_animation(pid, moves, anims, true)
@@ -1052,16 +1128,20 @@ func _apply_move_with_animation(
 	return result
 
 
-func _build_move_animations(moves: Dictionary) -> Array:
+func _build_move_animations(moves: Dictionary, pre_positions: Dictionary = {}) -> Array:
 	var anims: Array = []
 	for unit_id in moves:
 		var unit: UnitBase = _find_unit_by_id(unit_id)
 		if unit == null:
 			continue
-		var dest: Vector2i = moves[unit_id]
-		if dest == unit.hex_position:
+		var dest: Vector2i = MatchController._parse_snapshot_hex(moves[unit_id])
+		var start_hex: Vector2i = pre_positions.get(unit_id, unit.hex_position)
+		if dest == start_hex:
 			continue
+		var saved_pos: Vector2i = unit.hex_position
+		unit.hex_position = start_hex
 		var path: Array[Vector2i] = match_ctrl.find_movement_path(unit, dest, moves)
+		unit.hex_position = saved_pos
 		if path.size() >= 2:
 			anims.append({"unit_id": unit_id, "path": path})
 	return anims
@@ -1206,7 +1286,7 @@ func _execute_action(action_type: String, payload: Dictionary) -> Dictionary:
 	var pid: int = payload.get("player_id", _get_active_player_id())
 	match action_type:
 		"move":
-			return match_ctrl.perform_move(pid, payload.get("moves", {}))
+			return match_ctrl.perform_move(pid, MatchController.decode_moves(payload.get("moves", {})))
 		"attack":
 			return match_ctrl.perform_attack(pid, payload.get("attacker_id", ""), payload.get("target_id", ""))
 		"ability":
@@ -1221,10 +1301,10 @@ func _execute_action(action_type: String, payload: Dictionary) -> Dictionary:
 
 func _submit_action(action_type: String, payload: Dictionary) -> void:
 	payload["player_id"] = _get_active_player_id()
-	if GameState.is_online() and not multiplayer.is_server():
+	if GameState.is_online() and not NetworkManager.is_server():
 		NetworkManager.rpc_submit_action.rpc_id(1, action_type, payload)
-	elif GameState.is_online() and multiplayer.is_server():
-		var result: Dictionary = _execute_action(action_type, payload)
+	elif GameState.is_online() and NetworkManager.is_server():
+		var result: Dictionary = _attach_action_sync(_execute_action(action_type, payload))
 		log_label.text = result.get("message", "Action resolved.")
 		NetworkManager.rpc_apply_action_result.rpc(action_type, payload, result)
 	else:
@@ -1232,37 +1312,59 @@ func _submit_action(action_type: String, payload: Dictionary) -> void:
 		log_label.text = result.get("message", "Action resolved.")
 
 
-# --- Online: host authoritative; moves get special animation sync path ---
+# --- Online: host authoritative; clients apply host state snapshots ---
 func _on_network_action(action_type: String, payload: Dictionary, result: Dictionary) -> void:
 	if action_type == "move":
-		var moves: Dictionary = payload.get("moves", {})
-		var pid: int = payload.get("player_id", 0)
-		var anims: Array = _build_move_animations(moves)
-		if result.is_empty() and multiplayer.is_server():
-			var move_result: Dictionary = await _apply_move_with_animation(pid, moves, anims, true)
+		var moves: Dictionary = MatchController.decode_moves(payload.get("moves", {}))
+		if result.is_empty() and NetworkManager.is_server():
+			var pid: int = int(payload.get("player_id", 0))
+			var anims: Array = _build_move_animations(moves)
+			var move_result: Dictionary = _attach_action_sync(
+				await _apply_move_with_animation(pid, moves, anims, true),
+			)
 			NetworkManager.rpc_apply_action_result.rpc(action_type, payload, move_result)
-		elif not result.is_empty() and not multiplayer.is_server():
+		elif not result.is_empty() and not NetworkManager.is_server():
+			if not result.get("success", false):
+				log_label.text = result.get("message", "Action rejected.")
+				return
+			var pre_positions: Dictionary = {}
+			for unit_id in moves:
+				var unit: UnitBase = match_ctrl.find_unit_by_id(unit_id)
+				if unit != null:
+					pre_positions[unit_id] = unit.hex_position
+			_apply_network_action_sync(result, false)
+			var anims: Array = _build_move_animations(moves, pre_positions)
 			for anim in anims:
 				_suppress_position_snap[anim["unit_id"]] = true
+			for unit_id in pre_positions:
+				var unit: UnitBase = match_ctrl.find_unit_by_id(unit_id)
+				if unit != null and not _unit_nodes.has(unit_id):
+					_spawn_unit_visual(unit, false)
+				if _unit_nodes.has(unit_id):
+					_place_unit_node(_unit_nodes[unit_id], pre_positions[unit_id])
 			_move_animating = true
-			var move_result: Dictionary = _execute_action(action_type, payload)
-			log_label.text = move_result.get("message", "Action resolved.")
-			if move_result.get("success", false):
-				_update_board_colors()
-				await _animate_unit_paths(anims)
+			log_label.text = result.get("message", "Action resolved.")
+			await _animate_unit_paths(anims)
 			for anim in anims:
 				_suppress_position_snap.erase(anim["unit_id"])
 			_move_animating = false
+			_update_unit_positions()
 			_refresh_ui()
 			_update_action_buttons()
 		return
-	if result.is_empty() and multiplayer.is_server():
-		result = _execute_action(action_type, payload)
+	if result.is_empty() and NetworkManager.is_server():
+		result = _attach_action_sync(_execute_action(action_type, payload))
 		NetworkManager.rpc_apply_action_result.rpc(action_type, payload, result)
 		log_label.text = result.get("message", "Action resolved.")
-	elif not result.is_empty() and not multiplayer.is_server():
-		_execute_action(action_type, payload)
+	elif not result.is_empty() and not NetworkManager.is_server():
+		if not result.get("success", false):
+			log_label.text = result.get("message", "Action rejected.")
+			return
+		_apply_network_action_sync(result)
+		_play_combat_from_result(action_type, payload, result)
 		log_label.text = result.get("message", "Action resolved.")
+		_refresh_ui()
+		_update_action_buttons()
 
 
 # --- Board clicks: behavior depends on current _action_mode ---

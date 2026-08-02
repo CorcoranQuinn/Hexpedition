@@ -13,6 +13,7 @@ signal rematch_requested(same_teams: bool)
 signal action_applied(action_type: String, payload: Dictionary, result: Dictionary)
 signal placement_submit_received(player_id: int, unit_id: String, hex: Vector2i)
 signal placement_snapshot_applied(snapshot: Dictionary)
+signal match_sync_applied(snapshot: Dictionary)
 signal saved_match_offered(summary: Dictionary)
 signal saved_match_resume_started(save_data: Dictionary)
 signal saved_match_discarded
@@ -149,6 +150,9 @@ func rpc_start_match(seed_value: int) -> void:
 func rpc_submit_action(action_type: String, payload: Dictionary) -> void:
 	if not _mp().is_server():
 		return
+	var player_id: int = int(payload.get("player_id", -1))
+	if not _is_authority_for_action(player_id):
+		return
 	action_applied.emit(action_type, payload, {})
 
 
@@ -175,6 +179,11 @@ func rpc_submit_placement_unit(player_id: int, unit_id: String, q: int, r: int) 
 @rpc("authority", "call_local", "reliable")
 func rpc_apply_placement_snapshot(snapshot: Dictionary) -> void:
 	placement_snapshot_applied.emit(snapshot)
+
+
+@rpc("authority", "call_local", "reliable")
+func rpc_apply_match_sync(snapshot: Dictionary) -> void:
+	match_sync_applied.emit(snapshot)
 
 
 # --- RPC: rematch flow ---
@@ -242,6 +251,10 @@ func _is_authority_for_placement(player_id: int) -> bool:
 	if sender == 0:
 		return player_id == 0
 	return player_id == 1
+
+
+func _is_authority_for_action(player_id: int) -> bool:
+	return _is_authority_for_placement(player_id)
 
 
 func submit_action(action_type: String, payload: Dictionary) -> void:
