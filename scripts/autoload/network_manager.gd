@@ -160,10 +160,16 @@ func rpc_apply_action_result(action_type: String, payload: Dictionary, result: D
 # --- RPC: pre-game deployment (host authoritative) ---
 
 @rpc("any_peer", "call_local", "reliable")
-func rpc_submit_placement_unit(player_id: int, unit_id: String, hex: Vector2i) -> void:
+func rpc_submit_placement_unit(player_id: int, unit_id: String, q: int, r: int) -> void:
 	if not _mp().is_server():
 		return
-	placement_submit_received.emit(player_id, unit_id, hex)
+	if not _is_authority_for_placement(player_id):
+		rpc_apply_placement_snapshot.rpc({
+			"success": false,
+			"message": "Not your deployment turn.",
+		})
+		return
+	placement_submit_received.emit(player_id, unit_id, Vector2i(q, r))
 
 
 @rpc("authority", "call_local", "reliable")
@@ -219,6 +225,24 @@ func rpc_request_discard_saved_match() -> void:
 
 
 # --- Local wrappers: route to RPC or emit directly for offline play ---
+
+func submit_placement_unit(player_id: int, unit_id: String, hex: Vector2i) -> void:
+	if GameState.match_mode == GameState.MatchMode.LOCAL or _mp().is_server():
+		placement_submit_received.emit(player_id, unit_id, hex)
+	else:
+		rpc_submit_placement_unit.rpc_id(1, player_id, unit_id, hex.x, hex.y)
+
+
+func _is_authority_for_placement(player_id: int) -> bool:
+	if GameState.match_mode == GameState.MatchMode.LOCAL:
+		return true
+	if not _mp().is_server():
+		return false
+	var sender: int = _mp().get_remote_sender_id()
+	if sender == 0:
+		return player_id == 0
+	return player_id == 1
+
 
 func submit_action(action_type: String, payload: Dictionary) -> void:
 	if GameState.match_mode == GameState.MatchMode.LOCAL:

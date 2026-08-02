@@ -229,14 +229,27 @@ func _complete_player_placement(player_id: int) -> void:
 
 
 func _make_placement_snapshot(unit_id: String, message: String) -> Dictionary:
+	var placed_unit: UnitBase = _find_unit_by_id(unit_id)
 	return {
 		"success": true,
 		"message": message,
 		"unit_id": unit_id,
-		"hex": _find_unit_by_id(unit_id).hex_position if _find_unit_by_id(unit_id) != null else Vector2i.ZERO,
+		"hex": placed_unit.hex_position if placed_unit != null else Vector2i.ZERO,
 		"placement_player": placement_player,
 		"placement_active": placement_active,
 	}
+
+
+func _parse_snapshot_hex(value) -> Vector2i:
+	if value is Vector2i:
+		return value
+	if value is Vector2:
+		return Vector2i(int(value.x), int(value.y))
+	if value is Dictionary:
+		return Vector2i(int(value.get("x", 0)), int(value.get("y", value.get("r", 0))))
+	if value is Array and value.size() >= 2:
+		return Vector2i(int(value[0]), int(value[1]))
+	return Vector2i.ZERO
 
 
 func apply_placement_snapshot(snapshot: Dictionary) -> void:
@@ -245,7 +258,7 @@ func apply_placement_snapshot(snapshot: Dictionary) -> void:
 	var unit: UnitBase = _find_unit_by_id(str(snapshot.get("unit_id", "")))
 	if unit == null:
 		return
-	var hex: Vector2i = snapshot.get("hex", Vector2i.ZERO)
+	var hex: Vector2i = _parse_snapshot_hex(snapshot.get("hex", Vector2i.ZERO))
 	if not is_unit_placed(unit):
 		unit.hex_position = hex
 		grid.on_unit_entered(hex, unit)

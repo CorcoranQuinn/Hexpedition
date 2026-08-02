@@ -101,7 +101,7 @@ func _deploy_player(player_id: int) -> void:
 			if _board.match_ctrl.get_unit_at(hex) == null:
 				target = hex
 				break
-		nm.rpc_submit_placement_unit.rpc_id(1, player_id, unplaced[0].id, target)
+		nm.submit_placement_unit(player_id, unplaced[0].id, target)
 		await process_frame
 
 

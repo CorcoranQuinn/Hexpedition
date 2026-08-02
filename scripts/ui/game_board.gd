@@ -128,6 +128,7 @@ const PLACEMENT_ZONE_BORDER := Color(0.45, 1.0, 0.65, 0.75)
 
 # --- Lifecycle: wire signals, start or resume match, build visuals ---
 func _ready() -> void:
+	add_to_group("game_board")
 	# Let board clicks fall through to _unhandled_input; child Controls such as
 	# the sidebar and unit popup still capture their own input.
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -444,7 +445,8 @@ func _run_placement_phase() -> void:
 		var pid: int = match_ctrl.placement_player
 		_camera_owner_id = -1
 		_update_camera_for_viewer(_get_viewer_player_id(), true)
-		_select_next_placement_unit(pid)
+		if _is_local_placement_player(pid):
+			_select_next_placement_unit(pid)
 		_refresh_placement_highlights()
 		_update_placement_ui()
 		if _should_auto_place(pid):
@@ -469,6 +471,8 @@ func _on_player_finished_placing(player_id: int) -> void:
 		if unit.owner_id == player_id and match_ctrl.is_unit_placed(unit):
 			if not _unit_nodes.has(unit.id):
 				_spawn_unit_visual(unit, true)
+	if _is_local_placement_player(match_ctrl.placement_player):
+		_select_next_placement_unit(match_ctrl.placement_player)
 	_refresh_placement_highlights()
 	_update_placement_ui()
 
@@ -529,6 +533,9 @@ func _refresh_placement_highlights() -> void:
 		return
 
 	var pid: int = match_ctrl.placement_player
+	if not _is_local_placement_player(pid):
+		return
+
 	for hex in match_ctrl.get_placement_zone(pid):
 		var poly := Polygon2D.new()
 		var points: PackedVector2Array = PackedVector2Array()
@@ -570,18 +577,25 @@ func _update_placement_ui() -> void:
 	lines.append("Deploy units — %s" % who)
 	lines.append("Team: %s" % team.team_name)
 	lines.append("")
-	lines.append("Place each unit in the highlighted rear rows.")
-	lines.append("Your leader's starting tile becomes your home base.")
+
+	var is_local_turn: bool = _is_local_placement_player(pid)
+	if is_local_turn:
+		lines.append("Place each unit in the highlighted rear rows.")
+		lines.append("Your leader's starting tile becomes your home base.")
+	else:
+		lines.append("Waiting for %s to finish deploying." % who)
 	lines.append("")
 
 	var unplaced: Array[UnitBase] = match_ctrl.get_unplaced_units(pid)
 	for unit in _get_roster_units(pid):
 		if match_ctrl.is_unit_placed(unit):
 			lines.append("✓ %s — deployed" % unit.display_name)
-		elif unit.id == _placement_selected_unit_id:
+		elif is_local_turn and unit.id == _placement_selected_unit_id:
 			lines.append("► %s — click a highlighted hex" % unit.display_name)
-		else:
+		elif is_local_turn:
 			lines.append("  %s — waiting" % unit.display_name)
+		else:
+			lines.append("  %s" % unit.display_name)
 
 	if unplaced.is_empty():
 		lines.append("")
@@ -609,27 +623,52 @@ func _rebuild_placement_unit_picker(player_id: int) -> void:
 		)
 
 
+func _get_local_placement_player_id() -> int:
+	if GameState.is_online():
+		return GameState.get_local_player_id()
+	if GameState.match_mode == GameState.MatchMode.LOCAL:
+		return match_ctrl.placement_player
+	return 0
+
+
+func _ensure_placement_selection(player_id: int) -> void:
+	if _get_selected_placement_unit(player_id) != null:
+		return
+	_select_next_placement_unit(player_id)
+
+
 func _handle_placement_click(hex: Vector2i) -> void:
 	if not _placement_active or not match_ctrl.placement_active:
 		return
-	var pid: int = match_ctrl.placement_player
-	if not _is_local_placement_player(pid):
+	var local_pid: int = _get_local_placement_player_id()
+	if match_ctrl.placement_player != local_pid:
 		return
-	var unit: UnitBase = _get_selected_placement_unit(pid)
+	if not _is_local_placement_player(local_pid):
+		return
+	_ensure_placement_selection(local_pid)
+	var unit: UnitBase = _get_selected_placement_unit(local_pid)
 	if unit == null:
 		log_label.text = "Select a unit to deploy."
 		return
-	if GameState.is_online() and not multiplayer.is_server():
-		NetworkManager.rpc_submit_placement_unit.rpc_id(1, pid, unit.id, hex)
+	if GameState.is_online() and not NetworkManager.is_server():
+		log_label.text = "Deploying %s..." % unit.display_name
+		NetworkManager.submit_placement_unit(local_pid, unit.id, hex)
 		return
-	var result: Dictionary = match_ctrl.place_unit(pid, unit.id, hex)
-	if GameState.is_online() and multiplayer.is_server():
+	if not match_ctrl.can_place_at(local_pid, hex):
+		log_label.text = "Can't deploy there."
+		return
+	var result: Dictionary = match_ctrl.place_unit(local_pid, unit.id, hex)
+	if not result.get("success", false):
+		log_label.text = result.get("message", "Deployment failed.")
+		return
+	if GameState.is_online():
 		NetworkManager.rpc_apply_placement_snapshot.rpc(result)
-	_apply_placement_result(result)
+	else:
+		_apply_placement_result(result)
 
 
 func _on_placement_submit_received(player_id: int, unit_id: String, hex: Vector2i) -> void:
-	if not GameState.is_online() or not multiplayer.is_server():
+	if not GameState.is_online() or not NetworkManager.is_server():
 		return
 	var result: Dictionary = match_ctrl.place_unit(player_id, unit_id, hex)
 	NetworkManager.rpc_apply_placement_snapshot.rpc(result)
@@ -653,7 +692,7 @@ func _apply_placement_result(result: Dictionary) -> void:
 		return
 	log_label.text = result.get("message", "Deployed.")
 	_spawn_unit_visual(unit, true)
-	_select_next_placement_unit(unit.owner_id)
+	_select_next_placement_unit(match_ctrl.placement_player)
 	_refresh_placement_highlights()
 	_update_placement_ui()
 

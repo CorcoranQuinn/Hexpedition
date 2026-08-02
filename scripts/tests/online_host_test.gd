@@ -110,7 +110,6 @@ func _deploy_player(player_id: int) -> void:
 		var result: Dictionary = _board.match_ctrl.place_unit(player_id, unit.id, target)
 		if result.get("success", false):
 			nm.rpc_apply_placement_snapshot.rpc(result)
-			_board._apply_placement_result(result)
 		await process_frame
 
 
